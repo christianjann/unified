@@ -1,0 +1,12 @@
+[package]
+name = "un-cache"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+home = "0.5"
+dirs = "5.0"
+thiserror.workspace = true
+anyhow.workspace = true

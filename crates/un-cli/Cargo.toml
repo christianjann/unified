@@ -1,0 +1,16 @@
+[package]
+name = "un-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+un-core = { path = "../un-core" }
+un-cache = { path = "../un-cache" }
+un-git = { path = "../un-git" }
+toml.workspace = true
+serde_json.workspace = true

@@ -1,9 +1,40 @@
-[package]
-name = "unifiedrepo"
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+authors = ["Christian Jann <christian.jann@ymail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/christianjann/unified"
+homepage = "https://github.com/christianjann/unified"
+description = "Unified Repo & Artifact Manager"
+
+[workspace.dependencies]
+# Shared dependencies go here
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+glob = "0.3"
+tempfile = "3.0"
+
+[package]
+name = "un"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "un"
 
 [dependencies]
+un-cli = { path = "crates/un-cli" }
+
+[dev-dependencies]
+un-cache = { path = "crates/un-cache" }
+un-core = { path = "crates/un-core" }
+un-git = { path = "crates/un-git" }

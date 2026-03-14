@@ -60,39 +60,40 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 
 **Goal:** Compilable workspace with config parsing and cache paths. No operations yet.
 
-- [ ] Convert `Cargo.toml` to workspace manifest
-- [ ] Create `crates/un-cli/` with clap CLI skeleton and command stubs
-- [ ] Create `crates/un-core/` with `Config` and `LockFile` serde structs
-- [ ] Create `crates/un-cache/` with cache directory layout
-- [ ] Create `crates/un-git/` with `GitReference` enum and stubs
-- [ ] Create `crates/un-download/` with provider trait and stubs
-- [ ] `un init` writes a scaffold `unified.toml`
-- [ ] Unit tests: config parsing round-trip, lock file serialization, cache path generation
+- [X] Convert `Cargo.toml` to workspace manifest
+- [X] Create `crates/un-cli/` with clap CLI skeleton and command stubs
+- [X] Create `crates/un-core/` with `Config` and `LockFile` serde structs
+- [X] Create `crates/un-cache/` with cache directory layout
+- [X] Create `crates/un-git/` with `GitReference` enum and stubs
+- [X] Create `crates/un-download/` with provider trait and stubs
+- [X] `un init` writes a scaffold `unified.toml`
+- [X] Unit tests: config parsing round-trip, lock file serialization, cache path generation
 
 ### Phase 2: Git operations
 
 **Goal:** `un sync` can clone and check out git repos.
 
-- [ ] Implement `GitRemote` — URL normalization, refspec construction
-- [ ] Implement `GitDatabase` — bare clone via gix, resolve refs to OIDs
-- [ ] Implement CLI fallback — shell out to `git` for fetch
-- [ ] Implement `GitCheckout` — worktree mode (git worktree add)
-- [ ] Implement `GitCheckout` — copy mode (hardlink/copy)
-- [ ] Implement `GitCheckout` — sparse worktree (include/exclude → blobless clone + sparse-checkout)
-- [ ] Implement `GitCheckout` — filtered copy (checkout=copy + include/exclude → walk+copy subset)
-- [ ] Implement shallow clone (`--depth 1`, orthogonal to checkout mode)
+- [X] Implement `GitRemote` — URL normalization, refspec construction
+- [X] Implement `GitDatabase` — bare clone via git CLI, resolve refs to OIDs (gix deferred)
+- [X] Implement CLI fallback — shell out to `git` for fetch
+- [X] Implement `GitCheckout` — worktree mode (git worktree add)
+- [X] Implement `GitCheckout` — copy mode (recursive hardlink/copy)
+- [X] Implement `GitCheckout` — sparse worktree (include/exclude → sparse-checkout with negation)
+- [X] Implement `GitCheckout` — filtered copy (checkout=copy + include/exclude → glob-matched walk+copy)
+- [X] Implement shallow clone (`--depth 1`, orthogonal to checkout mode)
 - [ ] Implement `--shallow` CLI flag and `UN_SHALLOW` env var
 - [ ] Atomic operations: `.unified-ok` markers, temp dirs
-- [ ] Integration test: `un sync` with file:// git repo
+- [X] Integration test: `un sync` with file:// git repo
 
 ### Phase 3: Core commands
 
 **Goal:** Full sync/status/update workflow.
 
-- [ ] `un sync` — orchestrate git fetches, populate workspace, write lock file
-- [ ] `un sync` — auto-update `.gitignore` (managed block with sentinel comments)
-- [ ] `un sync` — auto-update `.vscode/settings.json` (`git.ignoredRepositories`)
-- [ ] `settings.manage-gitignore` / `settings.manage-vscode` opt-out flags
+- [X] `un sync` — orchestrate git fetches, populate workspace, write lock file
+- [X] `un sync` — auto-update `.gitignore` (managed block with sentinel comments, safe on malformed blocks)
+- [X] `un sync` — auto-update `.vscode/settings.json` (`git.ignoredRepositories`)
+- [X] `settings.manage-gitignore` / `settings.manage-vscode` opt-out flags
+- [X] Deduplicated `GitReference` — single definition in `un-core`, used by all crates
 - [ ] `un sync --locked` — fail if config changed since lock
 - [ ] `un sync --frozen` — no network, cache-only
 - [ ] `un status` — report clean/modified/ahead-behind per repo

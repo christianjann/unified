@@ -1,0 +1,430 @@
+use std::path::{Path, PathBuf};
+use un_cache::Cache;
+use un_core::GitReference;
+use anyhow::{Context, Result};
+use glob::Pattern;
+
+#[derive(Debug, Clone)]
+pub enum CheckoutMode {
+    Worktree,
+    Copy,
+    SparseWorktree { includes: Vec<String>, excludes: Vec<String> },
+    FilteredCopy { includes: Vec<String>, excludes: Vec<String> },
+}
+
+pub struct GitRemote {
+    url: String,
+}
+
+impl GitRemote {
+    pub fn new(url: &str) -> Self {
+        let normalized = normalize_url(url);
+        GitRemote { url: normalized }
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn refspecs_for(&self, reference: &GitReference) -> Vec<String> {
+        match reference {
+            GitReference::Branch(name) => vec![format!("+refs/heads/{name}:refs/heads/{name}")],
+            GitReference::Tag(name) => vec![format!("+refs/tags/{name}:refs/tags/{name}")],
+            GitReference::Rev(_) => vec![], // No fetch needed for rev
+            GitReference::DefaultBranch => vec!["+HEAD:refs/remotes/origin/HEAD".to_string()],
+        }
+    }
+}
+
+fn normalize_url(url: &str) -> String {
+    let mut url = url.trim_end_matches('/').to_string();
+    if url.starts_with("file://") {
+        // Handle file:// URLs - resolve relative paths
+        let path_part = &url[7..]; // Remove "file://"
+        if path_part.starts_with("./") || (!path_part.starts_with('/') && !path_part.contains("://")) {
+            // Relative path - resolve relative to current directory
+            if let Ok(cwd) = std::env::current_dir() {
+                let abs_path = cwd.join(path_part);
+                if let Ok(abs_path) = abs_path.canonicalize() {
+                    url = format!("file://{}", abs_path.display());
+                }
+            }
+        }
+    } else if url.contains('@') && !url.starts_with("ssh://") && !url.starts_with("https://") {
+        // SCP style: git@github.com:user/repo.git -> ssh://git@github.com/user/repo.git
+        if let Some(colon) = url.find(':') {
+            let host = &url[..colon];
+            let path = &url[colon + 1..];
+            url = format!("ssh://{}/{}", host, path);
+        }
+    }
+    url
+}
+
+pub struct GitDatabase {
+    path: PathBuf,
+}
+
+impl GitDatabase {
+    pub fn new(cache: &Cache, name: &str, url: &str) -> Result<Self> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        url.hash(&mut hasher);
+        let hash = hasher.finish();
+        let short_hash = format!("{:x}", hash).chars().take(16).collect::<String>();
+        let path = cache.git_db().join(format!("{}-{}", name, short_hash));
+        if !path.exists() {
+            std::fs::create_dir_all(&path)?;
+            let status = std::process::Command::new("git")
+                .args(["init", "--bare"])
+                .current_dir(&path)
+                .status()
+                .context("failed to run `git init --bare` — is git installed?")?;
+            if !status.success() {
+                anyhow::bail!("git init --bare failed in {}", path.display());
+            }
+            let status = std::process::Command::new("git")
+                .args(["remote", "add", "origin", url])
+                .current_dir(&path)
+                .status()
+                .context("failed to run `git remote add`")?;
+            if !status.success() {
+                anyhow::bail!("git remote add origin failed in {}", path.display());
+            }
+        }
+        Ok(GitDatabase { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn fetch(&self, remote: &GitRemote, reference: &GitReference, shallow: bool, _use_cli: bool) -> Result<String> {
+        // Always use CLI for now (gix integration deferred)
+        self.fetch_with_cli(remote, reference, shallow)?;
+        self.resolve_oid(reference)
+    }
+
+    fn fetch_with_cli(&self, remote: &GitRemote, reference: &GitReference, shallow: bool) -> Result<()> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("fetch").arg(remote.url());
+        if shallow {
+            cmd.args(["--depth", "1"]);
+        }
+        for refspec in &remote.refspecs_for(reference) {
+            cmd.arg(refspec);
+        }
+        let status = cmd.current_dir(&self.path)
+            .status()
+            .context("failed to run `git fetch` — is git installed?")?;
+        if !status.success() {
+            anyhow::bail!("git fetch failed for {}", remote.url());
+        }
+        Ok(())
+    }
+
+    fn resolve_oid(&self, reference: &GitReference) -> Result<String> {
+        let ref_str = match reference {
+            GitReference::Branch(name) => format!("refs/heads/{}", name),
+            GitReference::Tag(name) => format!("refs/tags/{}", name),
+            GitReference::Rev(rev) => rev.to_string(),
+            GitReference::DefaultBranch => "refs/remotes/origin/HEAD".to_string(),
+        };
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", &ref_str])
+            .current_dir(&self.path)
+            .output()
+            .context("failed to run `git rev-parse`")?;
+        if output.status.success() {
+            Ok(String::from_utf8(output.stdout)?.trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("failed to resolve ref '{}': {}", ref_str, stderr.trim()))
+        }
+    }
+}
+
+pub struct GitCheckout {
+    path: PathBuf,
+}
+
+impl GitCheckout {
+    pub fn new(database: &GitDatabase, oid: &str, workspace_path: &Path, mode: CheckoutMode) -> Result<Self> {
+        match mode {
+            CheckoutMode::Worktree => {
+                std::fs::create_dir_all(workspace_path.parent().unwrap_or(workspace_path))?;
+                let status = std::process::Command::new("git")
+                    .args(["worktree", "add", &workspace_path.to_string_lossy(), oid])
+                    .current_dir(&database.path)
+                    .status()
+                    .context("failed to run `git worktree add`")?;
+                if !status.success() {
+                    anyhow::bail!("git worktree add failed for {}", workspace_path.display());
+                }
+            }
+            CheckoutMode::Copy => {
+                Self::checkout_copy(database, oid, workspace_path)?;
+            }
+            CheckoutMode::SparseWorktree { includes, excludes } => {
+                Self::checkout_sparse_worktree(database, oid, workspace_path, includes, excludes)?;
+            }
+            CheckoutMode::FilteredCopy { includes, excludes } => {
+                Self::checkout_filtered_copy(database, oid, workspace_path, includes, excludes)?;
+            }
+        }
+        Ok(GitCheckout { path: workspace_path.to_path_buf() })
+    }
+
+    fn checkout_copy(database: &GitDatabase, oid: &str, workspace_path: &Path) -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path();
+        let status = std::process::Command::new("git")
+            .args(["--work-tree", &temp_path.to_string_lossy(), "checkout", oid, "--", "."])
+            .current_dir(&database.path)
+            .status()
+            .context("failed to run `git checkout` for copy mode")?;
+        if !status.success() {
+            anyhow::bail!("git checkout failed for oid {}", oid);
+        }
+        std::fs::create_dir_all(workspace_path)?;
+        Self::copy_recursive(temp_path, workspace_path)?;
+        Ok(())
+    }
+
+    fn checkout_sparse_worktree(database: &GitDatabase, oid: &str, workspace_path: &Path, includes: Vec<String>, excludes: Vec<String>) -> Result<()> {
+        std::fs::create_dir_all(workspace_path.parent().unwrap_or(workspace_path))?;
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "--detach", &workspace_path.to_string_lossy(), oid])
+            .current_dir(&database.path)
+            .status()
+            .context("failed to run `git worktree add --detach`")?;
+        if !status.success() {
+            anyhow::bail!("git worktree add --detach failed for {}", workspace_path.display());
+        }
+
+        let status = std::process::Command::new("git")
+            .args(["sparse-checkout", "init", "--cone"])
+            .current_dir(workspace_path)
+            .status()
+            .context("failed to run `git sparse-checkout init`")?;
+        if !status.success() {
+            anyhow::bail!("git sparse-checkout init failed in {}", workspace_path.display());
+        }
+
+        // Build sparse-checkout patterns: includes are added directly,
+        // excludes are prefixed with '!' (negation)
+        let mut patterns: Vec<String> = includes;
+        for exclude in excludes {
+            patterns.push(format!("!{}", exclude));
+        }
+        if !patterns.is_empty() {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(["sparse-checkout", "set"]);
+            for pattern in &patterns {
+                cmd.arg(pattern);
+            }
+            let status = cmd.current_dir(workspace_path)
+                .status()
+                .context("failed to run `git sparse-checkout set`")?;
+            if !status.success() {
+                anyhow::bail!("git sparse-checkout set failed in {}", workspace_path.display());
+            }
+        }
+        Ok(())
+    }
+
+    fn checkout_filtered_copy(database: &GitDatabase, oid: &str, workspace_path: &Path, includes: Vec<String>, excludes: Vec<String>) -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path();
+        let status = std::process::Command::new("git")
+            .args(["--work-tree", &temp_path.to_string_lossy(), "checkout", oid, "--", "."])
+            .current_dir(&database.path)
+            .status()
+            .context("failed to run `git checkout` for filtered copy")?;
+        if !status.success() {
+            anyhow::bail!("git checkout failed for oid {}", oid);
+        }
+        std::fs::create_dir_all(workspace_path)?;
+        Self::copy_filtered(temp_path, workspace_path, &includes, &excludes)?;
+        Ok(())
+    }
+
+    fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                std::fs::create_dir_all(&dst_path)?;
+                Self::copy_recursive(&src_path, &dst_path)?;
+            } else {
+                // Try hard link first, fall back to copy
+                if std::fs::hard_link(&src_path, &dst_path).is_err() {
+                    std::fs::copy(&src_path, &dst_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_filtered(src: &Path, dst: &Path, includes: &[String], excludes: &[String]) -> Result<()> {
+        let include_patterns: Vec<Pattern> = includes.iter()
+            .map(|p| Pattern::new(p))
+            .collect::<Result<Vec<_>, _>>()
+            .context("invalid include glob pattern")?;
+        let exclude_patterns: Vec<Pattern> = excludes.iter()
+            .map(|p| Pattern::new(p))
+            .collect::<Result<Vec<_>, _>>()
+            .context("invalid exclude glob pattern")?;
+
+        Self::copy_filtered_recursive(src, dst, src, &include_patterns, &exclude_patterns)
+    }
+
+    fn copy_filtered_recursive(
+        entry_path: &Path,
+        dst_base: &Path,
+        src_base: &Path,
+        includes: &[Pattern],
+        excludes: &[Pattern],
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(entry_path)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let rel_path = src_path.strip_prefix(src_base)
+                .unwrap_or(&src_path)
+                .to_string_lossy();
+
+            if src_path.is_dir() {
+                // Recurse into directories — filtering applies to files
+                Self::copy_filtered_recursive(&src_path, dst_base, src_base, includes, excludes)?;
+            } else {
+                // Apply include filter: if includes are specified, file must match at least one
+                let included = includes.is_empty()
+                    || includes.iter().any(|p| p.matches(&rel_path));
+                if !included {
+                    continue;
+                }
+                // Apply exclude filter: if file matches any exclude, skip it
+                let excluded = excludes.iter().any(|p| p.matches(&rel_path));
+                if excluded {
+                    continue;
+                }
+
+                let dst_path = dst_base.join(src_path.strip_prefix(src_base).unwrap_or(&src_path));
+                if let Some(parent) = dst_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if std::fs::hard_link(&src_path, &dst_path).is_err() {
+                    std::fs::copy(&src_path, &dst_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_url() {
+        assert_eq!(normalize_url("https://github.com/user/repo.git"), "https://github.com/user/repo.git");
+        assert_eq!(normalize_url("https://github.com/user/repo.git/"), "https://github.com/user/repo.git");
+        assert_eq!(normalize_url("git@github.com:user/repo.git"), "ssh://git@github.com/user/repo.git");
+    }
+
+    #[test]
+    fn test_refspecs_for() {
+        let remote = GitRemote::new("https://github.com/user/repo.git");
+        assert_eq!(remote.refspecs_for(&GitReference::Branch("main".to_string())), vec!["+refs/heads/main:refs/heads/main"]);
+        assert_eq!(remote.refspecs_for(&GitReference::Tag("v1.0".to_string())), vec!["+refs/tags/v1.0:refs/tags/v1.0"]);
+        assert_eq!(remote.refspecs_for(&GitReference::Rev("abc123".to_string())), Vec::<String>::new());
+        assert_eq!(remote.refspecs_for(&GitReference::DefaultBranch), vec!["+HEAD:refs/remotes/origin/HEAD"]);
+    }
+
+    #[test]
+    fn test_git_database_new() {
+        let cache_root = std::path::PathBuf::from("tests/test_cache");
+        let _ = std::fs::remove_dir_all(&cache_root); // Clean up from previous runs
+        let cache = un_cache::Cache::with_custom_root(cache_root.clone());
+        let db = GitDatabase::new(&cache, "test", "https://github.com/user/repo.git").unwrap();
+        assert!(db.path().to_string_lossy().contains("test-"));
+        let _ = std::fs::remove_dir_all(&cache_root); // Clean up after test
+    }
+
+    #[test]
+    fn test_copy_recursive() {
+        let temp_src = tempfile::tempdir().unwrap();
+        let temp_dst = tempfile::tempdir().unwrap();
+
+        // Create nested structure
+        std::fs::create_dir_all(temp_src.path().join("sub/nested")).unwrap();
+        std::fs::write(temp_src.path().join("root.txt"), "root").unwrap();
+        std::fs::write(temp_src.path().join("sub/mid.txt"), "mid").unwrap();
+        std::fs::write(temp_src.path().join("sub/nested/deep.txt"), "deep").unwrap();
+
+        GitCheckout::copy_recursive(temp_src.path(), temp_dst.path()).unwrap();
+
+        assert!(temp_dst.path().join("root.txt").exists());
+        assert!(temp_dst.path().join("sub/mid.txt").exists());
+        assert!(temp_dst.path().join("sub/nested/deep.txt").exists());
+        assert_eq!(std::fs::read_to_string(temp_dst.path().join("sub/nested/deep.txt")).unwrap(), "deep");
+    }
+
+    #[test]
+    fn test_copy_filtered_with_patterns() {
+        let temp_src = tempfile::tempdir().unwrap();
+        let temp_dst = tempfile::tempdir().unwrap();
+
+        // Create files
+        std::fs::create_dir_all(temp_src.path().join("src")).unwrap();
+        std::fs::create_dir_all(temp_src.path().join("tests")).unwrap();
+        std::fs::write(temp_src.path().join("src/lib.rs"), "lib").unwrap();
+        std::fs::write(temp_src.path().join("src/main.rs"), "main").unwrap();
+        std::fs::write(temp_src.path().join("tests/test.rs"), "test").unwrap();
+        std::fs::write(temp_src.path().join("README.md"), "readme").unwrap();
+
+        // Include only src/**, exclude nothing
+        GitCheckout::copy_filtered(
+            temp_src.path(),
+            temp_dst.path(),
+            &["src/**".to_string()],
+            &[],
+        ).unwrap();
+
+        assert!(temp_dst.path().join("src/lib.rs").exists());
+        assert!(temp_dst.path().join("src/main.rs").exists());
+        assert!(!temp_dst.path().join("tests/test.rs").exists());
+        assert!(!temp_dst.path().join("README.md").exists());
+    }
+
+    #[test]
+    fn test_copy_filtered_with_excludes() {
+        let temp_src = tempfile::tempdir().unwrap();
+        let temp_dst = tempfile::tempdir().unwrap();
+
+        // Create files
+        std::fs::create_dir_all(temp_src.path().join("src")).unwrap();
+        std::fs::write(temp_src.path().join("src/lib.rs"), "lib").unwrap();
+        std::fs::write(temp_src.path().join("src/test.rs"), "test").unwrap();
+        std::fs::write(temp_src.path().join("README.md"), "readme").unwrap();
+
+        // Include everything, exclude *test*
+        GitCheckout::copy_filtered(
+            temp_src.path(),
+            temp_dst.path(),
+            &[],
+            &["**/test*".to_string()],
+        ).unwrap();
+
+        assert!(temp_dst.path().join("src/lib.rs").exists());
+        assert!(!temp_dst.path().join("src/test.rs").exists());
+        assert!(temp_dst.path().join("README.md").exists());
+    }
+}

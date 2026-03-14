@@ -1,0 +1,11 @@
+[package]
+name = "un-download"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+un-cache = { path = "../un-cache" }
+thiserror.workspace = true
+anyhow.workspace = true

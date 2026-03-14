@@ -1,0 +1,12 @@
+[workspace]
+name = "my-workspace"
+
+[settings]
+git_fetch_with_cli = false
+parallel = 4
+shallow = false
+manage_gitignore = true
+manage_vscode = true
+
+[repos]
+test-repo = { url = "file://./tests/test_data/source", path = "tests/repos/test-repo" }

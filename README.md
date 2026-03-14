@@ -38,7 +38,7 @@ Modern software projects span multiple repositories, binary artifacts, and exter
 cargo install unifiedrepo
 
 # Or build from this repo
-git clone https://github.com/user/unified.git
+git clone https://github.com/christianjann/unified.git
 cd unified
 cargo install --path .
 ```
