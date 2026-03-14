@@ -96,6 +96,7 @@ unified.toml ──→ Config ──→ Resolver ──→ Operations ──→ 
    - **Git repos**: Fetch into `~/.unified/git/db/{name}-{hash}/`, then create checkout
    - **Artifacts**: Download to `~/.unified/artifacts/{name}-{hash}/{version}/`
    - **Tools**: Download to `~/.unified/tools/{name}/{version}/`
+   - **Apps**: Download to `~/.unified/apps/{name}/{version}/`
 
 5. **Populate workspace** — Create worktrees or copy files into workspace paths specified in config.
 
@@ -408,6 +409,9 @@ $UNIFIED_HOME/                       # Default: ~/.unified
 │   └── {name}/
 │       └── {version}/
 │           └── {binary}              # Tool executables
+├── apps/
+│   └── {name}/
+│       └── {version}/                # Downloaded applications
 ├── bin/                              # Global tool symlinks (un tool install)
 └── tmp/                              # In-progress downloads
     └── {uuid}.partial                # Resumable partial downloads
@@ -537,6 +541,115 @@ To opt out of automatic integration file management:
 manage-gitignore = false      # Don't touch .gitignore
 manage-vscode = false          # Don't touch .vscode/settings.json
 ```
+
+## Tool & App Execution
+
+Tools (`[tools]`) and apps (`[apps]`) share the same download infrastructure as artifacts (Provider trait, platform detection, checksum verification). The difference is lifecycle:
+
+- **Artifacts** are placed at a workspace `path` and treated as static data.
+- **Tools** are executables cached in `~/.unified/tools/{name}/{version}/` and run via `un run <tool>`.
+- **Apps** are larger applications cached in `~/.unified/apps/{name}/{version}/` and launched via `un app <name>`.
+
+### Tool Execution (`un run`)
+
+```
+un run protoc -- --cpp_out=gen/ protos/*.proto
+
+1. Resolve version    →  Find latest matching version in cache or fetch metadata
+2. Download (if new)  →  Provider.download() → ~/.unified/tools/protoc/v25.1/protoc
+3. Prepare env        →  Merge tool's `env` field into environment
+4. Prepend args       →  Tool's `args` + user's args → final argv
+5. Exec               →  Replace process (unix: execvp, windows: CreateProcess)
+```
+
+Tools support workspace-specific configuration via `env` and `args`:
+
+```toml
+[tools.clang-format]
+artifactory = "tools/llvm/clang-format"
+version = "17.*"
+env = { CLANG_FORMAT_STYLE = "file" }      # Set when running
+args = ["--style=file"]                     # Prepended to user args
+```
+
+### Global Install (`un tool install`)
+
+`un tool install <name>` creates a symlink in `~/.unified/bin/` pointing to the cached tool binary. Users add `~/.unified/bin/` to their `PATH` for direct invocation without `un run`.
+
+### App Launch (`un app`)
+
+Same download mechanism as tools. `un app <name>` downloads (if needed) and launches the application. Apps are expected to be self-contained executables or directories — `un` does not manage installation beyond downloading and extracting.
+
+## Task Runner
+
+`un` provides a minimal task runner via `[tasks]` — named shell commands with optional dependencies. This is intentionally simple; for complex build workflows, use a dedicated task runner like [just](https://github.com/casey/just) and call it from tasks:
+
+```toml
+[tasks.format]
+cmd = "un run clang-format -- src/**/*.cpp"
+description = "Format C++ files"
+
+[tasks.build]
+cmd = "just build"                  # Delegate to Justfile
+depends = ["format"]
+```
+
+### Execution (`un task <name>`)
+
+1. Topological sort on `depends` — detect cycles, error if found
+2. Execute each dependency in order (not parallel — keep it simple)
+3. Execute the task's `cmd` via the system shell (`sh -c` / `cmd /c`)
+4. Exit code propagation — if any step fails, abort
+
+`un task` (no name) lists all tasks with their descriptions.
+
+## Setup Hooks
+
+`[setup]` defines a list of commands run by `un setup`. These handle one-time workspace environment configuration that doesn't belong in sync — IDE extension installation, environment verification, etc.
+
+```toml
+[setup]
+run = [
+    "code --install-extension rust-lang.rust-analyzer",
+    "code --install-extension tamasfe.even-better-toml",
+    "un run protoc --version",
+]
+```
+
+`un setup` runs each command sequentially via the system shell. It's idempotent — safe to run repeatedly. It is **not** invoked by `un sync`; developers run it explicitly after initial sync or when setup changes.
+
+This is deliberately generic — no IDE-specific logic in `un` itself. Any editor, tool, or environment setup works as long as it's a shell command.
+
+## Launcher
+
+The launcher generates a platform-specific script (`launch.sh` / `launch.bat`) that presents an interactive numbered menu referencing apps, tasks, and arbitrary commands.
+
+```toml
+[launcher]
+generate = true
+
+[[launcher.entries]]
+name = "Open IDE"
+app = "clion"                       # Downloads + launches [apps.clion]
+icon = "🔧"
+
+[[launcher.entries]]
+name = "Format Code"
+task = "format"                     # Runs [tasks.format] with depends
+icon = "✨"
+
+[[launcher.entries]]
+name = "Open Editor"
+cmd = "code ."                      # Arbitrary command
+icon = "📝"
+```
+
+Generation happens during `un sync`. Each entry resolves to a shell command:
+- `app = "..."` → `un app <name>`
+- `task = "..."` → `un task <name>`
+- `cmd = "..."` → literal command
+
+The generated script is self-contained — it doesn't require `un` to be installed (entries using `app` or `task` do invoke `un`, but `cmd` entries are plain shell).
 
 ## Concurrency Model
 

@@ -25,6 +25,7 @@ Modern software projects span multiple repositories, binary artifacts, and exter
 - **Workspace checkout** — Repos appear at specified paths via git worktrees or file copies
 - **Artifact downloads** — From GitHub Releases, Artifactory, or any HTTP/HTTPS URL
 - **Tool execution** — `un run <tool>` downloads and runs tools on demand
+- **Setup hooks** — `un setup` runs workspace setup commands (IDE extensions, environment config)
 - **Selective checkout** — `include`/`exclude` globs per repo — sparse worktree or filtered copy
 - **CI-optimized** — `--shallow` for depth-1 clones, composes with sparse for minimal transfer
 - **Corporate-friendly** — `git-fetch-with-cli` option for proxy/SSH/credential helper configs
@@ -121,9 +122,11 @@ version = "2.0.*"
 path = "vendor/sdk"
 ```
 
-### 4. Add tools
+### 4. Add tools, tasks, and apps
 
 ```toml
+# ─── Tools (downloaded on demand, cached per-version) ─────────────
+
 [tools.protoc]
 github = "protocolbuffers/protobuf"
 version = ">=25.0"
@@ -131,6 +134,74 @@ version = ">=25.0"
 [tools.buf]
 github = "bufbuild/buf"
 version = "1.*"
+
+[tools.clang-format]
+artifactory = "tools/llvm/clang-format"
+version = "17.*"
+env = { CLANG_FORMAT_STYLE = "file" }      # Set env vars when running via `un run`
+args = ["--style=file"]                     # Default args prepended to `un run` invocations
+
+# ─── Tasks (workspace commands, like npm scripts) ─────────────────
+
+[tasks.format]
+cmd = "un run clang-format -- src/**/*.cpp"
+description = "Format all C++ source files"
+
+[tasks.gen-protos]
+cmd = "un run protoc -- --cpp_out=gen/ protos/*.proto"
+description = "Generate C++ from proto files"
+depends = ["format"]                        # Run these tasks first
+
+[tasks.check]
+cmd = "cargo clippy --workspace"
+description = "Run lints"
+
+# For complex task workflows, use a Justfile and call it from tasks:
+# [tasks.build]
+# cmd = "just build"
+
+# ─── Setup (commands run by `un setup`, e.g. IDE config) ─────────
+
+[setup]
+run = [
+    "code --install-extension rust-lang.rust-analyzer",
+    "code --install-extension tamasfe.even-better-toml",
+    "un run protoc --version",              # Verify tools work
+]
+
+# ─── Apps (downloadable applications) ────────────────────────────
+
+[apps.clion]
+artifactory = "tools/jetbrains/clion"
+version = "2025.*"
+description = "CLion IDE"
+icon = "🔧"
+
+[apps.custom-debugger]
+github = "org/debugger-gui"
+version = ">=2.0"
+description = "Internal Debugger"
+icon = "🐛"
+
+# ─── Launcher (generated click-to-run entry point) ───────────────
+
+[launcher]
+generate = true                             # un sync generates launch.sh / launch.bat
+
+[[launcher.entries]]
+name = "Open in CLion"
+app = "clion"                               # References [apps.clion]
+icon = "🔧"
+
+[[launcher.entries]]
+name = "Open in VS Code"
+cmd = "code ."
+icon = "📝"
+
+[[launcher.entries]]
+name = "Format Code"
+task = "format"                             # References [tasks.format]
+icon = "✨"
 ```
 
 ### 5. Sync the workspace
@@ -143,8 +214,11 @@ This will:
 1. Clone/fetch all git repos into `~/.unified/git/db/`
 2. Check out the specified revisions into your workspace paths
 3. Download artifacts to `~/.unified/artifacts/` and link them to workspace paths
-4. Write `unified.lock` with pinned revisions and checksums
-5. Update `.gitignore` and `.vscode/settings.json` to exclude managed paths
+4. Download tools and apps to `~/.unified/tools/` and `~/.unified/apps/`
+5. Write `unified.lock` with pinned revisions and checksums
+6. Update `.gitignore` and `.vscode/settings.json` to exclude managed paths
+
+Then run `un setup` to execute workspace setup commands (install IDE extensions, etc.).
 
 ```
 $ un sync
@@ -159,7 +233,11 @@ $ un sync
   Download  test-vectors v1.2.0 (GitHub: org/test-vectors)
   Download  firmware-binary (https://releases.example.com/...)
   Cached    internal-sdk v2.0.3 (already downloaded)
-  Locked    unified.lock (3 repos, 3 artifacts)
+  Tool      protoc v25.1 (GitHub: protocolbuffers/protobuf)
+  Tool      buf v1.28.0 (GitHub: bufbuild/buf)
+  Cached    clang-format v17.0.6 (already downloaded)
+  App       clion v2025.1 (Artifactory: tools/jetbrains/clion)
+  Locked    unified.lock (3 repos, 3 artifacts, 3 tools, 1 app)
   Updated   .gitignore (6 paths)
   Updated   .vscode/settings.json (6 repos excluded from git scanning)
      Done   in 4.2s
@@ -205,13 +283,18 @@ For fine-grained git operations (interactive staging, rebase, etc.), `cd` into t
 | `un diff [<repo>]` | Show uncommitted diffs. Without `<repo>`, shows diffs across all worktree repos |
 | `un log <repo> [-n N]` | Show recent commits (`git log --oneline`) |
 
-### Tools
+### Tools & Tasks
 
 | Command | Description |
 |---------|-------------|
-| `un run <tool> [args...]` | Download (if needed) and execute a tool |
+| `un run <tool> [args...]` | Download (if needed) and execute a tool. Prepends tool's default `args` and sets `env`. |
+| `un task <name>` | Run a named task from `[tasks]`. Resolves `depends` first. |
+| `un task` | List all available tasks with descriptions |
 | `un tool install <name>` | Install a tool globally to `~/.unified/bin/` |
-| `un tool list` | List installed tools |
+| `un tool list` | List installed tools and their cached versions |
+| `un app <name>` | Download (if needed) and launch an application from `[apps]` |
+| `un setup` | Run setup commands from `[setup]` (e.g. install IDE extensions) |
+| `un launch` | Show interactive launcher menu (same as running `./launch.sh`) |
 
 ### Utility
 
@@ -264,6 +347,52 @@ github = "org/tool-repo"          # GitHub Releases source
 # artifactory = "tools/mytool"    # Artifactory source
 # url = "https://..."             # Direct URL
 version = "1.*"                   # Semver requirement
+env = { KEY = "value" }            # Environment variables set during `un run` (optional)
+args = ["--flag"]                  # Default args prepended to `un run` invocations (optional)
+
+# ─── Tasks ────────────────────────────────────────────────────────
+
+[tasks.example]
+cmd = "un run mytool -- src/"      # Shell command to execute
+description = "Run mytool on src"  # Shown by `un task` (optional)
+depends = ["other-task"]           # Run these tasks first (optional)
+
+# ─── Setup ────────────────────────────────────────────────────────
+
+[setup]
+run = [                            # Commands executed by `un setup`
+    "code --install-extension org.my-ext",
+    "un run mytool --version",
+]
+
+# ─── Apps ─────────────────────────────────────────────────────────
+
+[apps.myapp]
+github = "org/app"                 # Same providers as tools/artifacts
+# artifactory = "tools/myapp"
+version = "2025.*"                 # Semver requirement
+description = "My Application"     # Shown by `un app` (optional)
+icon = "🔧"                        # Launcher menu icon (optional)
+
+# ─── Launcher ─────────────────────────────────────────────────────
+
+[launcher]
+generate = true                    # `un sync` generates launch.sh / launch.bat
+
+[[launcher.entries]]
+name = "Open App"                  # Menu entry label
+app = "myapp"                      # References [apps.myapp]
+icon = "🔧"
+
+[[launcher.entries]]
+name = "Run Task"
+task = "example"                   # References [tasks.example]
+icon = "✨"
+
+[[launcher.entries]]
+name = "Custom Command"
+cmd = "code ."                     # Arbitrary shell command
+icon = "📝"
 
 # ─── Settings ─────────────────────────────────────────────────────
 
@@ -324,6 +453,9 @@ All data is cached at `~/.unified/` (overridable via `UNIFIED_HOME` env var or `
 │   └── protoc/
 │       └── v25.1/
 │           └── protoc             # Executable
+├── apps/
+│   └── clion/
+│       └── v2025.1/              # Downloaded application
 ├── bin/                           # Globally installed tool symlinks
 │   ├── protoc -> ../tools/protoc/v25.1/protoc
 │   └── buf -> ../tools/buf/v1.28.0/buf

@@ -112,17 +112,25 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 - [ ] `un log <repo> [-n N]` — `git log --oneline` in worktree
 - [ ] Error on copy-mode repos with clear message: "repo X is in copy mode, switch to worktree for git operations"
 
-### Phase 5: Artifact & tool management
+### Phase 5: Artifact, tool, and app management
 
-**Goal:** Download artifacts and execute tools.
+**Goal:** Download artifacts, execute tools, manage apps, basic tasks, setup hooks, launcher.
 
 - [ ] Download engine — reqwest, resume, SHA-256, progress
 - [ ] GitHub Releases provider — API, semver, platform detection
 - [ ] Artifactory provider — storage API, bearer auth
 - [ ] Generic HTTP provider — direct URL, checksum
 - [ ] Artifact sync integrated into `un sync`
-- [ ] `un run <tool> [args...]` — download + execute
+- [ ] `un run <tool> [args...]` — download + exec, with `env` and `args` fields
 - [ ] `un tool install` — global install to `~/.unified/bin/`
+- [ ] `un app <name>` — download + launch application from `[apps]`
+- [ ] `un task <name>` — run named task, topological sort on `depends`
+- [ ] `un task` — list all tasks with descriptions
+- [ ] `un setup` — run `[setup].run` commands sequentially (idempotent, not part of sync)
+- [ ] `[launcher]` — generate `launch.sh` / `launch.bat` menu script during `un sync`
+- [ ] `un launch` — interactive launcher menu
+
+Note: Tasks are intentionally minimal. For complex build workflows, prefer [just](https://github.com/casey/just) and call it from tasks (`cmd = "just build"`).
 
 ### Phase 6: Polish & CI
 
