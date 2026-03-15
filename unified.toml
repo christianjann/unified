@@ -9,4 +9,4 @@ manage_gitignore = true
 manage_vscode = true
 
 [repos]
-test-repo = { url = "file://./tests/test_data/source", path = "tests/repos/test-repo" }
+test-repo = { url = "file://./crates/un-cli/tests/test_data/source", path = "crates/un-cli/tests/repos/test-repo" }

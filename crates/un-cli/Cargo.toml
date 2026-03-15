@@ -9,6 +9,10 @@ homepage.workspace = true
 
 [lib]
 
+[[bin]]
+name = "un"
+path = "src/main.rs"
+
 [dependencies]
 un-core = { path = "../un-core" }
 un-cache = { path = "../un-cache" }

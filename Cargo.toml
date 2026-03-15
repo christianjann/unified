@@ -29,20 +29,5 @@ home = "0.5"
 dirs = "6.0"
 clap = { version = "4.0", features = ["derive"] }
 
-[package]
-name = "un"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
 
-[[bin]]
-name = "un"
 
-[dependencies]
-un-cli = { path = "crates/un-cli" }
-
-[dev-dependencies]
-un-cache = { path = "crates/un-cache" }
-un-core = { path = "crates/un-core" }
-un-git = { path = "crates/un-git" }
