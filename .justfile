@@ -52,3 +52,7 @@ test-reset: test-clean test-setup
 # Run sync command
 sync:
     cargo run -- sync
+
+# Build and install the un command system wide
+install:
+    cargo install --path .
