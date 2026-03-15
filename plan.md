@@ -153,6 +153,23 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 
 Note: Tasks are intentionally minimal. For complex build workflows, prefer [just](https://github.com/casey/just) and call it from tasks (`cmd = "just build"`).
 
+### Phase 5.5: Multi-provider support
+
+**Goal:** Support GitHub Enterprise, self-hosted GitLab, Gitea/Forgejo, and company Artifactory instances via a `[providers]` config table. Tokens are resolved from configurable environment variables.
+
+- [X] `[providers.<name>]` config schema — `type` (github/gitlab/gitea/artifactory), `api_url`, `token_env`
+- [X] `ProviderType` enum, `Provider` struct, `ResolvedProvider` in `un-core`
+- [X] `Config::resolve_provider()` — resolves named provider or falls back to built-in defaults
+- [X] Built-in defaults: `github` → api.github.com / `GITHUB_TOKEN`, `gitlab` → gitlab.com / `GITLAB_TOKEN`, `gitea` → gitea.com / `GITEA_TOKEN`, `artifactory` → `ARTIFACTORY_URL` / `ARTIFACTORY_TOKEN`
+- [X] `gitlab = "group/project"` and `gitea = "owner/repo"` fields on artifacts, tools, apps
+- [X] `provider = "name"` field on artifacts, tools, apps — selects a configured provider instance
+- [X] GitLab Releases provider (`/api/v4/projects/{id}/releases`, `PRIVATE-TOKEN` auth, page-based pagination)
+- [X] Gitea/Forgejo Releases provider (`/api/v1/repos/{owner}/{repo}/releases`, `token` auth)
+- [X] Parameterized GitHub provider — `api_url` + `token` passed explicitly (no hardcoded `api.github.com`)
+- [X] Parameterized Artifactory provider — `api_url` + `token` passed explicitly (no hardcoded env vars)
+- [X] Provider-aware download: each provider method handles its own auth headers (no domain-matching)
+- [X] All existing `un sync`, `un run`, `un app`, `un tool install` paths updated to resolve providers
+
 ### Phase 6: Polish & CI
 
 **Goal:** Production-ready for daily developer use and CI pipelines.

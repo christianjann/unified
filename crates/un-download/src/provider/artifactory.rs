@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use super::{DownloadEngine, Release, ReleaseAsset};
+use super::{Release, ReleaseAsset};
 
 pub struct ArtifactoryProvider;
 
@@ -9,9 +9,10 @@ impl ArtifactoryProvider {
     /// Fetch all releases from an Artifactory storage path.
     /// Uses the Artifactory Storage API: `GET /artifactory/api/storage/{path}?list&deep=1`
     pub fn get_releases(
-        engine: &DownloadEngine,
+        client: &reqwest::blocking::Client,
         base_url: &str,
         repo_path: &str,
+        token: Option<&str>,
     ) -> Result<Vec<Release>> {
         let url = format!(
             "{}/artifactory/api/storage/{}",
@@ -19,14 +20,13 @@ impl ArtifactoryProvider {
             repo_path
         );
 
-        let mut builder = engine
-            .client()
+        let mut builder = client
             .get(&url)
             .query(&[("list", ""), ("deep", "1")])
             .header("User-Agent", "unified/0.1");
 
-        if let Some(token) = engine.artifactory_token() {
-            builder = builder.header("Authorization", format!("Bearer {}", token));
+        if let Some(t) = token {
+            builder = builder.header("Authorization", format!("Bearer {}", t));
         }
 
         let response = builder
@@ -91,14 +91,17 @@ impl ArtifactoryProvider {
     }
 
     /// Download an asset from Artifactory with bearer auth.
-    pub fn download_asset(engine: &DownloadEngine, url: &str) -> Result<Vec<u8>> {
-        let mut builder = engine
-            .client()
+    pub fn download_asset(
+        client: &reqwest::blocking::Client,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let mut builder = client
             .get(url)
             .header("User-Agent", "unified/0.1");
 
-        if let Some(token) = engine.artifactory_token() {
-            builder = builder.header("Authorization", format!("Bearer {}", token));
+        if let Some(t) = token {
+            builder = builder.header("Authorization", format!("Bearer {}", t));
         }
 
         let response = builder

@@ -7,9 +7,9 @@ use tui_banner::{Banner, Style};
 use un_cache::Cache;
 use un_core::{
     App, Config, DownloadSource, GitReference, LockFile, LockedApp, LockedArtifact,
-    LockedRepo, LockedTool, Settings, Tool, UserConfig,
+    LockedRepo, LockedTool, ProviderType, Settings, Tool, UserConfig,
 };
-use un_download::{DownloadEngine, GitHubProvider, ArtifactoryProvider, HttpProvider};
+use un_download::{DownloadEngine, GitHubProvider, GitLabProvider, GiteaProvider, ArtifactoryProvider, HttpProvider};
 use un_git::{CheckoutMode, GitCheckout, GitDatabase, GitRemote};
 
 #[derive(Parser)]
@@ -369,6 +369,7 @@ fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
             exclude: None,
         },
         settings: Some(Settings::default()),
+        providers: std::collections::HashMap::new(),
         repos: std::collections::HashMap::new(),
         artifacts: std::collections::HashMap::new(),
         tools: std::collections::HashMap::new(),
@@ -536,6 +537,7 @@ fn cmd_sync(
     let active_artifacts = config.artifacts_for_collection(active_collection.as_deref())?;
     let locked_artifacts = sync_downloadables(
         &engine,
+        &config,
         &cache,
         "artifacts",
         &active_artifacts
@@ -544,6 +546,7 @@ fn cmd_sync(
                 (
                     n.as_str(),
                     a.source(),
+                    a.provider_name(),
                     a.version.as_deref(),
                     a.sha256.as_deref(),
                     &a.platform,
@@ -557,6 +560,7 @@ fn cmd_sync(
     let empty_platform: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let locked_tools_raw = sync_downloadables(
         &engine,
+        &config,
         &cache,
         "tools",
         &active_tools
@@ -565,6 +569,7 @@ fn cmd_sync(
                 (
                     n.as_str(),
                     t.source(),
+                    t.provider_name(),
                     t.version.as_deref(),
                     None::<&str>,
                     &empty_platform,
@@ -591,6 +596,7 @@ fn cmd_sync(
     let active_apps: std::collections::HashMap<String, App> = config.apps.clone();
     let locked_apps_raw = sync_downloadables(
         &engine,
+        &config,
         &cache,
         "apps",
         &active_apps
@@ -599,6 +605,7 @@ fn cmd_sync(
                 (
                     n.as_str(),
                     a.source(),
+                    a.provider_name(),
                     a.version.as_deref(),
                     None::<&str>,
                     &empty_platform,
@@ -1458,10 +1465,11 @@ fn cmd_collection_show(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 // ── Phase 5: Download, tool, app, task, setup, launcher ──
 
-/// A downloadable item spec: (name, source, version_req, sha256, platform_map, workspace_path).
+/// A downloadable item spec: (name, source, provider_name, version_req, sha256, platform_map, workspace_path).
 type DownloadSpec<'a> = (
     &'a str,
     Option<DownloadSource>,
+    Option<&'a str>,
     Option<&'a str>,
     Option<&'a str>,
     &'a std::collections::HashMap<String, String>,
@@ -1472,28 +1480,38 @@ type DownloadSpec<'a> = (
 /// Returns a map of locked entries for the successfully downloaded items.
 fn sync_downloadables(
     engine: &DownloadEngine,
+    config: &Config,
     cache: &Cache,
     category: &str,
     items: &[DownloadSpec<'_>],
 ) -> Result<std::collections::HashMap<String, LockedArtifact>, Box<dyn std::error::Error>> {
     let mut locked = std::collections::HashMap::new();
 
-    for &(name, ref source, version_str, expected_sha256, platform_map, _workspace_path) in items {
+    for &(name, ref source, provider_name, version_str, expected_sha256, platform_map, _workspace_path) in items {
         let Some(source) = source else {
             eprintln!("  {} — no source configured, skipping", name);
             continue;
         };
 
+        let resolved = config.resolve_provider(provider_name, source);
+
         match source {
-            DownloadSource::GitHub { owner_repo } => {
+            DownloadSource::GitHub { owner_repo } | DownloadSource::Gitea { owner_repo } => {
                 let version_req_str = version_str.unwrap_or("*");
                 let version_req = semver::VersionReq::parse(version_req_str).map_err(|e| {
                     format!("invalid version requirement '{}' for {}: {}", version_req_str, name, e)
                 })?;
 
-                // Check if already cached
-                let releases = GitHubProvider::get_releases(engine, owner_repo)?;
-                let resolved = DownloadEngine::choose_asset(&releases, &version_req, platform_map)
+                let releases = match resolved.provider_type {
+                    ProviderType::Gitea => GiteaProvider::get_releases(
+                        engine.client(), &resolved.api_url, owner_repo, resolved.token.as_deref(),
+                    )?,
+                    _ => GitHubProvider::get_releases(
+                        engine.client(), &resolved.api_url, owner_repo, resolved.token.as_deref(),
+                    )?,
+                };
+
+                let chosen = DownloadEngine::choose_asset(&releases, &version_req, platform_map)
                     .ok_or_else(|| {
                         format!(
                             "no compatible release found for {} ({} {})",
@@ -1502,19 +1520,30 @@ fn sync_downloadables(
                     })?;
 
                 let cache_dir =
-                    DownloadEngine::cache_path(cache, category, name, &resolved.version);
+                    DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
                 if cache_dir.exists() {
                     println!(
                         "  Cached    {} v{} (already downloaded)",
-                        name, resolved.version
+                        name, chosen.version
                     );
                 } else {
+                    let type_label = match resolved.provider_type {
+                        ProviderType::Gitea => "Gitea",
+                        _ => "GitHub",
+                    };
                     println!(
-                        "  Download  {} v{} (GitHub: {})",
-                        name, resolved.version, owner_repo
+                        "  Download  {} v{} ({}: {})",
+                        name, chosen.version, type_label, owner_repo
                     );
-                    let data = engine.download_bytes(&resolved.url)?;
+                    let data = match resolved.provider_type {
+                        ProviderType::Gitea => GiteaProvider::download_asset(
+                            engine.client(), &chosen.url, resolved.token.as_deref(),
+                        )?,
+                        _ => GitHubProvider::download_asset(
+                            engine.client(), &chosen.url, resolved.token.as_deref(),
+                        )?,
+                    };
                     let sha = DownloadEngine::sha256(&data);
 
                     if let Some(expected) = expected_sha256
@@ -1526,32 +1555,92 @@ fn sync_downloadables(
                             .into());
                         }
 
-                    un_download::extract_archive(&data, &resolved.asset_name, &cache_dir)?;
+                    un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                }
+
+                let sha = expected_sha256.unwrap_or("").to_string();
+                let source_label = match resolved.provider_type {
+                    ProviderType::Gitea => format!("gitea:{}", owner_repo),
+                    _ => format!("github:{}", owner_repo),
+                };
+                locked.insert(
+                    name.to_string(),
+                    LockedArtifact {
+                        source: source_label,
+                        version: chosen.version,
+                        url: chosen.url,
+                        sha256: sha,
+                    },
+                );
+            }
+            DownloadSource::GitLab { project } => {
+                let version_req_str = version_str.unwrap_or("*");
+                let version_req = semver::VersionReq::parse(version_req_str).map_err(|e| {
+                    format!("invalid version requirement '{}' for {}: {}", version_req_str, name, e)
+                })?;
+
+                let releases = GitLabProvider::get_releases(
+                    engine.client(), &resolved.api_url, project, resolved.token.as_deref(),
+                )?;
+                let chosen = DownloadEngine::choose_asset(&releases, &version_req, platform_map)
+                    .ok_or_else(|| {
+                        format!(
+                            "no compatible release found for {} ({} {})",
+                            name, project, version_req_str
+                        )
+                    })?;
+
+                let cache_dir =
+                    DownloadEngine::cache_path(cache, category, name, &chosen.version);
+
+                if cache_dir.exists() {
+                    println!(
+                        "  Cached    {} v{} (already downloaded)",
+                        name, chosen.version
+                    );
+                } else {
+                    println!(
+                        "  Download  {} v{} (GitLab: {})",
+                        name, chosen.version, project
+                    );
+                    let data = GitLabProvider::download_asset(
+                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                    )?;
+                    let sha = DownloadEngine::sha256(&data);
+
+                    if let Some(expected) = expected_sha256
+                        && sha != expected {
+                            return Err(format!(
+                                "SHA-256 mismatch for {}: expected {}, got {}",
+                                name, expected, sha
+                            )
+                            .into());
+                        }
+
+                    un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
                 }
 
                 let sha = expected_sha256.unwrap_or("").to_string();
                 locked.insert(
                     name.to_string(),
                     LockedArtifact {
-                        source: format!("github:{}", owner_repo),
-                        version: resolved.version,
-                        url: resolved.url,
+                        source: format!("gitlab:{}", project),
+                        version: chosen.version,
+                        url: chosen.url,
                         sha256: sha,
                     },
                 );
             }
             DownloadSource::Artifactory { path } => {
-                // For Artifactory, we need a base URL from env or convention
-                let base_url = std::env::var("ARTIFACTORY_URL")
-                    .unwrap_or_else(|_| "https://artifactory.example.com".to_string());
-
                 let version_req_str = version_str.unwrap_or("*");
                 let version_req = semver::VersionReq::parse(version_req_str).map_err(|e| {
                     format!("invalid version requirement '{}' for {}: {}", version_req_str, name, e)
                 })?;
 
-                let releases = ArtifactoryProvider::get_releases(engine, &base_url, path)?;
-                let resolved = DownloadEngine::choose_asset(&releases, &version_req, platform_map)
+                let releases = ArtifactoryProvider::get_releases(
+                    engine.client(), &resolved.api_url, path, resolved.token.as_deref(),
+                )?;
+                let chosen = DownloadEngine::choose_asset(&releases, &version_req, platform_map)
                     .ok_or_else(|| {
                         format!(
                             "no compatible release found for {} ({} {})",
@@ -1560,19 +1649,21 @@ fn sync_downloadables(
                     })?;
 
                 let cache_dir =
-                    DownloadEngine::cache_path(cache, category, name, &resolved.version);
+                    DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
                 if cache_dir.exists() {
                     println!(
                         "  Cached    {} v{} (already downloaded)",
-                        name, resolved.version
+                        name, chosen.version
                     );
                 } else {
                     println!(
                         "  Download  {} v{} (Artifactory: {})",
-                        name, resolved.version, path
+                        name, chosen.version, path
                     );
-                    let data = ArtifactoryProvider::download_asset(engine, &resolved.url)?;
+                    let data = ArtifactoryProvider::download_asset(
+                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                    )?;
                     let sha = DownloadEngine::sha256(&data);
 
                     if let Some(expected) = expected_sha256
@@ -1584,7 +1675,7 @@ fn sync_downloadables(
                             .into());
                         }
 
-                    un_download::extract_archive(&data, &resolved.asset_name, &cache_dir)?;
+                    un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
                 }
 
                 let sha = expected_sha256.unwrap_or("").to_string();
@@ -1592,8 +1683,8 @@ fn sync_downloadables(
                     name.to_string(),
                     LockedArtifact {
                         source: format!("artifactory:{}", path),
-                        version: resolved.version,
-                        url: resolved.url,
+                        version: chosen.version,
+                        url: chosen.url,
                         sha256: sha,
                     },
                 );
@@ -1683,17 +1774,26 @@ fn copy_dir_recursive(
 fn ensure_tool_downloaded(
     name: &str,
     tool: &Tool,
+    config: &Config,
     cache: &Cache,
 ) -> Result<(std::path::PathBuf, String), Box<dyn std::error::Error>> {
     let engine = DownloadEngine::new();
     let source = tool.source().ok_or_else(|| format!("tool '{}' has no source configured", name))?;
+    let resolved = config.resolve_provider(tool.provider_name(), &source);
 
     match source {
-        DownloadSource::GitHub { owner_repo } => {
+        DownloadSource::GitHub { owner_repo } | DownloadSource::Gitea { owner_repo } => {
             let version_req_str = tool.version.as_deref().unwrap_or("*");
             let version_req = semver::VersionReq::parse(version_req_str)?;
-            let releases = GitHubProvider::get_releases(&engine, &owner_repo)?;
-            let resolved =
+            let releases = match resolved.provider_type {
+                ProviderType::Gitea => GiteaProvider::get_releases(
+                    engine.client(), &resolved.api_url, &owner_repo, resolved.token.as_deref(),
+                )?,
+                _ => GitHubProvider::get_releases(
+                    engine.client(), &resolved.api_url, &owner_repo, resolved.token.as_deref(),
+                )?,
+            };
+            let chosen =
                 DownloadEngine::choose_asset(&releases, &version_req, &std::collections::HashMap::new())
                     .ok_or_else(|| {
                         format!(
@@ -1702,21 +1802,53 @@ fn ensure_tool_downloaded(
                         )
                     })?;
 
-            let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &resolved.version);
+            let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
             if !cache_dir.exists() {
-                println!("  Downloading {} v{}...", name, resolved.version);
-                let data = engine.download_bytes(&resolved.url)?;
-                un_download::extract_archive(&data, &resolved.asset_name, &cache_dir)?;
+                println!("  Downloading {} v{}...", name, chosen.version);
+                let data = match resolved.provider_type {
+                    ProviderType::Gitea => GiteaProvider::download_asset(
+                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                    )?,
+                    _ => GitHubProvider::download_asset(
+                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                    )?,
+                };
+                un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
             }
-            Ok((cache_dir, resolved.version))
+            Ok((cache_dir, chosen.version))
         }
-        DownloadSource::Artifactory { path } => {
-            let base_url = std::env::var("ARTIFACTORY_URL")
-                .unwrap_or_else(|_| "https://artifactory.example.com".to_string());
+        DownloadSource::GitLab { project } => {
             let version_req_str = tool.version.as_deref().unwrap_or("*");
             let version_req = semver::VersionReq::parse(version_req_str)?;
-            let releases = ArtifactoryProvider::get_releases(&engine, &base_url, &path)?;
-            let resolved =
+            let releases = GitLabProvider::get_releases(
+                engine.client(), &resolved.api_url, &project, resolved.token.as_deref(),
+            )?;
+            let chosen =
+                DownloadEngine::choose_asset(&releases, &version_req, &std::collections::HashMap::new())
+                    .ok_or_else(|| {
+                        format!(
+                            "no compatible release found for {} ({} {})",
+                            name, project, version_req_str
+                        )
+                    })?;
+
+            let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
+            if !cache_dir.exists() {
+                println!("  Downloading {} v{}...", name, chosen.version);
+                let data = GitLabProvider::download_asset(
+                    engine.client(), &chosen.url, resolved.token.as_deref(),
+                )?;
+                un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+            }
+            Ok((cache_dir, chosen.version))
+        }
+        DownloadSource::Artifactory { path } => {
+            let version_req_str = tool.version.as_deref().unwrap_or("*");
+            let version_req = semver::VersionReq::parse(version_req_str)?;
+            let releases = ArtifactoryProvider::get_releases(
+                engine.client(), &resolved.api_url, &path, resolved.token.as_deref(),
+            )?;
+            let chosen =
                 DownloadEngine::choose_asset(&releases, &version_req, &std::collections::HashMap::new())
                     .ok_or_else(|| {
                         format!(
@@ -1725,13 +1857,15 @@ fn ensure_tool_downloaded(
                         )
                     })?;
 
-            let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &resolved.version);
+            let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
             if !cache_dir.exists() {
-                println!("  Downloading {} v{}...", name, resolved.version);
-                let data = ArtifactoryProvider::download_asset(&engine, &resolved.url)?;
-                un_download::extract_archive(&data, &resolved.asset_name, &cache_dir)?;
+                println!("  Downloading {} v{}...", name, chosen.version);
+                let data = ArtifactoryProvider::download_asset(
+                    engine.client(), &chosen.url, resolved.token.as_deref(),
+                )?;
+                un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
             }
-            Ok((cache_dir, resolved.version))
+            Ok((cache_dir, chosen.version))
         }
         DownloadSource::Url { url } => {
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, "latest");
@@ -1818,7 +1952,7 @@ fn cmd_run(tool_name: &str, extra_args: Vec<String>) -> Result<(), Box<dyn std::
         .ok_or_else(|| format!("tool '{}' not found in unified.toml [tools]", tool_name))?;
 
     let cache = Cache::new()?;
-    let (cache_dir, _version) = ensure_tool_downloaded(tool_name, tool, &cache)?;
+    let (cache_dir, _version) = ensure_tool_downloaded(tool_name, tool, &config, &cache)?;
     let exe = find_executable(&cache_dir, tool_name)?;
 
     // Build args: tool's default args + user args
@@ -1865,7 +1999,7 @@ fn cmd_tool_install(name: Option<String>) -> Result<(), Box<dyn std::error::Erro
     };
 
     for (tool_name, tool) in &tools_to_install {
-        let (cache_dir, version) = ensure_tool_downloaded(tool_name, tool, &cache)?;
+        let (cache_dir, version) = ensure_tool_downloaded(tool_name, tool, &config, &cache)?;
         let exe = find_executable(&cache_dir, tool_name)?;
 
         let link_path = bin_dir.join(tool_name);
@@ -1932,49 +2066,87 @@ fn cmd_app(app_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Cache::new()?;
     let engine = DownloadEngine::new();
     let source = app.source().ok_or_else(|| format!("app '{}' has no source configured", app_name))?;
+    let resolved_provider = config.resolve_provider(app.provider_name(), &source);
 
     let (cache_dir, version) = match source {
-        DownloadSource::GitHub { owner_repo } => {
+        DownloadSource::GitHub { ref owner_repo } | DownloadSource::Gitea { ref owner_repo } => {
             let version_req_str = app.version.as_deref().unwrap_or("*");
             let version_req = semver::VersionReq::parse(version_req_str)?;
-            let releases = GitHubProvider::get_releases(&engine, &owner_repo)?;
-            let resolved =
+            let releases = match resolved_provider.provider_type {
+                ProviderType::Gitea => GiteaProvider::get_releases(
+                    engine.client(), &resolved_provider.api_url, owner_repo, resolved_provider.token.as_deref(),
+                )?,
+                _ => GitHubProvider::get_releases(
+                    engine.client(), &resolved_provider.api_url, owner_repo, resolved_provider.token.as_deref(),
+                )?,
+            };
+            let chosen =
                 DownloadEngine::choose_asset(&releases, &version_req, &std::collections::HashMap::new())
                     .ok_or_else(|| {
                         format!("no compatible release found for {} ({})", app_name, owner_repo)
                     })?;
-            let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &resolved.version);
+            let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &chosen.version);
             if !dir.exists() {
-                println!("  Downloading {} v{}...", app_name, resolved.version);
-                let data = engine.download_bytes(&resolved.url)?;
-                un_download::extract_archive(&data, &resolved.asset_name, &dir)?;
+                println!("  Downloading {} v{}...", app_name, chosen.version);
+                let data = match resolved_provider.provider_type {
+                    ProviderType::Gitea => GiteaProvider::download_asset(
+                        engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                    )?,
+                    _ => GitHubProvider::download_asset(
+                        engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                    )?,
+                };
+                un_download::extract_archive(&data, &chosen.asset_name, &dir)?;
             }
-            (dir, resolved.version)
+            (dir, chosen.version)
         }
-        DownloadSource::Artifactory { path } => {
-            let base_url = std::env::var("ARTIFACTORY_URL")
-                .unwrap_or_else(|_| "https://artifactory.example.com".to_string());
+        DownloadSource::GitLab { ref project } => {
             let version_req_str = app.version.as_deref().unwrap_or("*");
             let version_req = semver::VersionReq::parse(version_req_str)?;
-            let releases = ArtifactoryProvider::get_releases(&engine, &base_url, &path)?;
-            let resolved =
+            let releases = GitLabProvider::get_releases(
+                engine.client(), &resolved_provider.api_url, project, resolved_provider.token.as_deref(),
+            )?;
+            let chosen =
+                DownloadEngine::choose_asset(&releases, &version_req, &std::collections::HashMap::new())
+                    .ok_or_else(|| {
+                        format!("no compatible release found for {} ({})", app_name, project)
+                    })?;
+            let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &chosen.version);
+            if !dir.exists() {
+                println!("  Downloading {} v{}...", app_name, chosen.version);
+                let data = GitLabProvider::download_asset(
+                    engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                )?;
+                un_download::extract_archive(&data, &chosen.asset_name, &dir)?;
+            }
+            (dir, chosen.version)
+        }
+        DownloadSource::Artifactory { ref path } => {
+            let version_req_str = app.version.as_deref().unwrap_or("*");
+            let version_req = semver::VersionReq::parse(version_req_str)?;
+            let releases = ArtifactoryProvider::get_releases(
+                engine.client(), &resolved_provider.api_url, path, resolved_provider.token.as_deref(),
+            )?;
+            let chosen =
                 DownloadEngine::choose_asset(&releases, &version_req, &std::collections::HashMap::new())
                     .ok_or_else(|| {
                         format!("no compatible release found for {} ({})", app_name, path)
                     })?;
-            let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &resolved.version);
+            let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &chosen.version);
             if !dir.exists() {
-                println!("  Downloading {} v{}...", app_name, resolved.version);
-                let data = ArtifactoryProvider::download_asset(&engine, &resolved.url)?;
-                un_download::extract_archive(&data, &resolved.asset_name, &dir)?;
+                println!("  Downloading {} v{}...", app_name, chosen.version);
+                let data = ArtifactoryProvider::download_asset(
+                    engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                )?;
+                un_download::extract_archive(&data, &chosen.asset_name, &dir)?;
             }
-            (dir, resolved.version)
+            (dir, chosen.version)
         }
-        DownloadSource::Url { url } => {
+        DownloadSource::Url { ref url } => {
             let dir = DownloadEngine::cache_path(&cache, "apps", app_name, "latest");
             if !dir.exists() {
                 println!("  Downloading {}...", app_name);
-                let data = HttpProvider::download(&engine, &url, None)?;
+                let data = HttpProvider::download(&engine, url, None)?;
                 let filename = url.rsplit('/').next().unwrap_or("download");
                 un_download::extract_archive(&data, filename, &dir)?;
             }

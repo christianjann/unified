@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use super::{DownloadEngine, Release, ReleaseAsset};
+use super::{Release, ReleaseAsset};
 
 /// Parses the GitHub `Link` header to extract the "next" page URL.
 fn parse_next_link(link_header: &str) -> Option<String> {
@@ -29,23 +29,29 @@ pub struct GitHubProvider;
 
 impl GitHubProvider {
     /// Fetch all releases for a GitHub repo (owner/repo format).
+    /// `api_url` is the API base (e.g. "https://api.github.com" or "https://github.mycompany.com/api/v3").
     /// Paginates automatically.
-    pub fn get_releases(engine: &DownloadEngine, owner_repo: &str) -> Result<Vec<Release>> {
+    pub fn get_releases(
+        client: &reqwest::blocking::Client,
+        api_url: &str,
+        owner_repo: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<Release>> {
         let mut all_releases = Vec::new();
         let mut next_url: Option<String> = Some(format!(
-            "https://api.github.com/repos/{}/releases?per_page=100",
+            "{}/repos/{}/releases?per_page=100",
+            api_url.trim_end_matches('/'),
             owner_repo
         ));
 
         while let Some(url) = next_url.take() {
-            let mut builder = engine
-                .client()
+            let mut builder = client
                 .get(&url)
                 .header("User-Agent", "unified/0.1")
                 .header("Accept", "application/vnd.github+json");
 
-            if let Some(token) = engine.github_token() {
-                builder = builder.header("Authorization", format!("token {}", token));
+            if let Some(t) = token {
+                builder = builder.header("Authorization", format!("token {}", t));
             }
 
             let response = builder
@@ -80,6 +86,34 @@ impl GitHubProvider {
         }
 
         Ok(all_releases)
+    }
+
+    /// Download an asset from GitHub with token auth.
+    pub fn download_asset(
+        client: &reqwest::blocking::Client,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let mut builder = client
+            .get(url)
+            .header("User-Agent", "unified/0.1")
+            .header("Accept", "application/octet-stream");
+
+        if let Some(t) = token {
+            builder = builder.header("Authorization", format!("token {}", t));
+        }
+
+        let response = builder
+            .send()
+            .with_context(|| format!("downloading from GitHub: {}", url))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("GitHub returned {} for {}", status, url);
+        }
+
+        let bytes = response.bytes()?;
+        Ok(bytes.to_vec())
     }
 }
 

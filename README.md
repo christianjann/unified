@@ -23,7 +23,8 @@ Modern software projects span multiple repositories, binary artifacts, and exter
 - **Deterministic lock file** — `unified.lock` pins exact revisions and checksums for reproducible builds
 - **Smart caching** — Bare git databases and artifact cache in `~/.unified/`, shared across workspaces
 - **Workspace checkout** — Repos appear at specified paths via git worktrees or file copies
-- **Artifact downloads** — From GitHub Releases, Artifactory, or any HTTP/HTTPS URL
+- **Artifact downloads** — From GitHub Releases, GitLab Releases, Gitea/Forgejo, Artifactory, or any HTTP/HTTPS URL
+- **Multi-provider** — Built-in support for GitHub, GitLab, Gitea/Forgejo, and Artifactory. Configure company instances (GitHub Enterprise, self-hosted GitLab, etc.) via `[providers]`
 - **Tool execution** — `un run <tool>` downloads and runs tools on demand
 - **Setup hooks** — `un setup` runs workspace setup commands (IDE extensions, environment config)
 - **Selective checkout** — `include`/`exclude` globs per repo — sparse worktree or filtered copy
@@ -121,11 +122,44 @@ path = "binaries/firmware.bin"
 artifactory = "libs-release/sdk/toolchain"
 version = "2.0.*"
 path = "vendor/sdk"
+
+[artifacts.models]
+gitlab = "ml-team/models"              # GitLab Releases (group/project or numeric ID)
+version = ">=2.0.0"
+path = "vendor/models"
+provider = "company-gitlab"             # Use a custom provider instance (see [providers])
+
+[artifacts.assets]
+gitea = "org/game-assets"               # Gitea/Forgejo Releases (owner/repo)
+version = "1.*"
+path = "vendor/assets"
 ```
 
 ### 4. Add tools, tasks, and apps
 
 ```toml
+# ─── Providers (custom instances of GitHub, GitLab, etc.) ────────
+
+[providers.company-gh]
+provider_type = "github"                    # github | gitlab | gitea | artifactory
+api_url = "https://github.example.com/api/v3"  # GitHub Enterprise API URL
+token_env = "GHE_TOKEN"                     # Env var holding the auth token
+
+[providers.company-gitlab]
+provider_type = "gitlab"
+api_url = "https://gitlab.example.com"      # Self-hosted GitLab
+token_env = "GITLAB_CORP_TOKEN"
+
+[providers.company-gitea]
+provider_type = "gitea"
+api_url = "https://gitea.example.com"       # Self-hosted Gitea/Forgejo
+token_env = "GITEA_CORP_TOKEN"
+
+[providers.company-artifactory]
+provider_type = "artifactory"
+api_url = "https://artifactory.example.com" # Company Artifactory instance
+token_env = "ARTIFACTORY_CORP_TOKEN"
+
 # ─── Tools (downloaded on demand, cached per-version) ─────────────
 
 [tools.protoc]
@@ -139,6 +173,7 @@ version = "1.*"
 [tools.clang-format]
 artifactory = "tools/llvm/clang-format"
 version = "17.*"
+provider = "company-artifactory"            # Use company Artifactory instance
 env = { CLANG_FORMAT_STYLE = "file" }      # Set env vars when running via `un run`
 args = ["--style=file"]                     # Default args prepended to `un run` invocations
 
@@ -389,20 +424,26 @@ shallow = false                              # true = --depth 1 (no history). Or
 
 [artifacts.my-artifact]
 github = "org/repo"                # GitHub Releases (owner/repo)
+# gitlab = "group/project"         # GitLab Releases (group/project or numeric ID)
+# gitea = "owner/repo"             # Gitea/Forgejo Releases (owner/repo)
 # artifactory = "path/to/artifact" # Artifactory path
 # url = "https://..."              # Direct URL
-version = ">=1.0.0, <2.0.0"       # Semver requirement (for github/artifactory)
+version = ">=1.0.0, <2.0.0"       # Semver requirement (for github/gitlab/gitea/artifactory)
 path = "vendor/artifact"           # Local path to place artifact
 sha256 = "..."                     # Expected checksum (optional for github, required for url)
+provider = "my-provider"           # Use a custom provider from [providers] (optional)
 platform = { linux-x86_64 = "linux-amd64", macos-aarch64 = "darwin-arm64" }  # Platform mappings (optional)
 
 # ─── Tools ────────────────────────────────────────────────────────
 
 [tools.mytool]
 github = "org/tool-repo"          # GitHub Releases source
+# gitlab = "group/project"        # GitLab Releases source
+# gitea = "owner/repo"            # Gitea/Forgejo Releases source
 # artifactory = "tools/mytool"    # Artifactory source
 # url = "https://..."             # Direct URL
 version = "1.*"                   # Semver requirement
+# provider = "my-provider"        # Custom provider from [providers] (optional)
 env = { KEY = "value" }            # Environment variables set during `un run` (optional)
 args = ["--flag"]                  # Default args prepended to `un run` invocations (optional)
 
@@ -425,6 +466,8 @@ run = [                            # Commands executed by `un setup`
 
 [apps.myapp]
 github = "org/app"                 # Same providers as tools/artifacts
+# gitlab = "group/app"
+# gitea = "owner/app"
 # artifactory = "tools/myapp"
 version = "2025.*"                 # Semver requirement
 description = "My Application"     # Shown by `un app` (optional)
@@ -456,6 +499,19 @@ icon = "📝"
 repos = ["mylib"]                  # Names from [repos.*] (optional)
 artifacts = ["my-artifact"]        # Names from [artifacts.*] (optional)
 tools = ["mytool"]                 # Names from [tools.*] (optional)
+
+# ─── Providers (custom instances of release APIs) ───────────────
+
+[providers.my-provider]
+provider_type = "github"           # github | gitlab | gitea | artifactory
+api_url = "https://github.example.com/api/v3"  # API base URL
+token_env = "GHE_TOKEN"            # Env var holding the auth token
+
+# Built-in defaults (no config needed for public instances):
+#   "github"      → https://api.github.com      / GITHUB_TOKEN
+#   "gitlab"      → https://gitlab.com           / GITLAB_TOKEN
+#   "gitea"       → https://gitea.com            / GITEA_TOKEN
+#   "artifactory" → ARTIFACTORY_URL env          / ARTIFACTORY_TOKEN
 
 # ─── Settings ─────────────────────────────────────────────────────
 
@@ -548,7 +604,7 @@ Multiple workspaces on the same machine share the git database cache. Fetching a
 2. **Reproducible** — `unified.lock` pins every revision and checksum. CI gets exactly what the developer locked.
 3. **Fast** — Parallel fetches, incremental git updates, hardlink copies, artifact caching. Written in Rust.
 4. **Non-destructive** — `un sync` never discards local changes. Dirty worktrees are reported, not overwritten.
-5. **Corporate-ready** — `git-fetch-with-cli` shells out to your system git, respecting proxy configs, SSH keys, credential helpers, and `.gitconfig`. Artifactory support with token auth.
+5. **Corporate-ready** — `git-fetch-with-cli` shells out to your system git, respecting proxy configs, SSH keys, credential helpers, and `.gitconfig`. Configurable `[providers]` for GitHub Enterprise, self-hosted GitLab/Gitea, and company Artifactory instances.
 6. **Composable** — Each workspace has its own `unified.toml`. Workspaces can be nested via `members`.
 
 ## Environment Variables
@@ -556,7 +612,9 @@ Multiple workspaces on the same machine share the git database cache. Fetching a
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `UNIFIED_HOME` | Cache directory location | `~/.unified` |
-| `GITHUB_TOKEN` | GitHub API authentication | — |
+| `GITHUB_TOKEN` | GitHub API authentication (public github.com) | — |
+| `GITLAB_TOKEN` | GitLab API authentication (public gitlab.com) | — |
+| `GITEA_TOKEN` | Gitea/Forgejo API authentication (public gitea.com) | — |
 | `ARTIFACTORY_TOKEN` | Artifactory authentication | — |
 | `UN_LOG` | Log level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
 | `UN_PARALLEL` | Max parallel operations | `4` |

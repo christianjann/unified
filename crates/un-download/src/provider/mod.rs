@@ -1,5 +1,7 @@
 pub mod artifactory;
+pub mod gitea;
 pub mod github;
+pub mod gitlab;
 pub mod http;
 
 use anyhow::Result;
@@ -32,11 +34,9 @@ pub struct ResolvedDownload {
     pub asset_name: String,
 }
 
-/// Main download engine — handles resolving, downloading, verifying, and caching.
+/// Main download engine — handles downloading, verifying, and caching.
 pub struct DownloadEngine {
     client: reqwest::blocking::Client,
-    github_token: Option<String>,
-    artifactory_token: Option<String>,
 }
 
 impl Default for DownloadEngine {
@@ -47,47 +47,21 @@ impl Default for DownloadEngine {
 
 impl DownloadEngine {
     pub fn new() -> Self {
-        let github_token = std::env::var("GITHUB_TOKEN").ok();
-        let artifactory_token = std::env::var("ARTIFACTORY_TOKEN").ok();
-
         let client = reqwest::blocking::Client::builder()
             .user_agent("unified/0.1")
             .build()
             .expect("failed to create HTTP client");
 
-        Self {
-            client,
-            github_token,
-            artifactory_token,
-        }
+        Self { client }
     }
 
     pub fn client(&self) -> &reqwest::blocking::Client {
         &self.client
     }
 
-    pub fn github_token(&self) -> Option<&str> {
-        self.github_token.as_deref()
-    }
-
-    pub fn artifactory_token(&self) -> Option<&str> {
-        self.artifactory_token.as_deref()
-    }
-
-    /// Download bytes from a URL, returning the raw data.
+    /// Download bytes from a URL (no auth — use provider-specific methods for authenticated downloads).
     pub fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let mut builder = self.client.get(url);
-
-        // Auto-attach auth tokens based on URL domain
-        if url.contains("api.github.com") || url.contains("github.com") {
-            if let Some(token) = &self.github_token {
-                builder = builder.header("Authorization", format!("token {}", token));
-            }
-            // GitHub API requires Accept header for binary downloads
-            builder = builder.header("Accept", "application/octet-stream");
-        }
-
-        let response = builder.send()?;
+        let response = self.client.get(url).send()?;
         let status = response.status();
         if !status.is_success() {
             anyhow::bail!("HTTP {} downloading {}", status, url);

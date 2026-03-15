@@ -32,8 +32,10 @@ unified/
 │   │       ├── client.rs   # HTTP client (reqwest), resume, progress
 │   │       ├── provider.rs # Provider trait
 │   │       └── providers/
-│   │           ├── github.rs      # GitHub Releases API
-│   │           ├── artifactory.rs # Artifactory API
+│   │           ├── github.rs      # GitHub Releases API (incl. GitHub Enterprise)
+│   │           ├── gitlab.rs      # GitLab Releases API (incl. self-hosted)
+│   │           ├── gitea.rs       # Gitea/Forgejo Releases API
+│   │           ├── artifactory.rs # Artifactory API (incl. company instances)
 │   │           └── http.rs        # Generic URL download
 │   └── un-cache/           # Cache directory layout and management
 │       └── src/
@@ -53,7 +55,7 @@ unified/
 | `un-cli` | User-facing CLI, output formatting, command orchestration | `clap`, `indicatif`, `console` |
 | `un-core` | Config parsing, lock file, workspace state, resolution | `serde`, `toml`, `semver`, `glob` |
 | `un-git` | All git operations, abstracted from CLI details | `gix`, `un-cache` |
-| `un-download` | HTTP downloads, provider APIs, checksum verification | `reqwest`, `sha2`, `un-cache` |
+| `un-download` | HTTP downloads, provider APIs, checksum verification | `reqwest`, `sha2`, `urlencoding`, `un-cache` |
 | `un-cache` | Cache directory paths and lifecycle | `home`, `dirs` |
 
 The crate boundary means `un-git` and `un-download` never depend on each other — they both depend on `un-cache` for path resolution, and `un-core` orchestrates them.
@@ -347,21 +349,65 @@ trait ArtifactProvider {
 ### Providers
 
 **GitHub Releases** (`github = "owner/repo"`)
-- Queries `GET /repos/{owner}/{repo}/releases` with pagination
+- Queries `GET {api_url}/repos/{owner}/{repo}/releases` with pagination
 - Parses `tag_name` as semver (strips leading `v`)
 - Selects asset matching platform keywords (configurable via `platform` map)
-- Auth via `GITHUB_TOKEN` env var or config
+- Auth via `Authorization: token {t}` header
+- Default API URL: `https://api.github.com`; overridable via `[providers]` for GitHub Enterprise
+
+**GitLab Releases** (`gitlab = "group/project"`)
+- Queries `GET {api_url}/api/v4/projects/{id}/releases` with pagination
+- Project identifier can be a numeric ID or a `group/project` path (URL-encoded)
+- Parses `tag_name` as semver (strips leading `v`)
+- Selects asset from `assets.links[]` matching platform keywords
+- Auth via `PRIVATE-TOKEN` header
+- Default API URL: `https://gitlab.com`; overridable via `[providers]` for self-hosted GitLab
+
+**Gitea/Forgejo Releases** (`gitea = "owner/repo"`)
+- Queries `GET {api_url}/api/v1/repos/{owner}/{repo}/releases` with pagination
+- Parses `tag_name` as semver (strips leading `v`)
+- Selects asset from `assets[]` using `browser_download_url` field
+- Auth via `Authorization: token {t}` header
+- Default API URL: `https://gitea.com`; overridable via `[providers]` for self-hosted instances
 
 **Artifactory** (`artifactory = "path/to/artifact"`)
 - Queries storage API: `GET {host}/artifactory/api/storage/{path}?list&deep&listFolders=1`
 - Extracts version directories from path structure
-- Auth via `ARTIFACTORY_TOKEN` env var or config
-- Host configured in `[settings]` or per-artifact
+- Auth via `Authorization: Bearer {t}` header
+- Host configured via `[providers]` or `ARTIFACTORY_URL` env var
 
 **Generic HTTP** (`url = "https://..."`)
 - Direct URL download, no version resolution
 - Requires `sha256` for integrity verification
 - Supports resume via `Range` header
+
+### Provider Configuration
+
+Each artifact, tool, or app specifies a source via one of: `github`, `gitlab`, `gitea`, `artifactory`, or `url`. An optional `provider` field references a named entry in `[providers]` to override the default API URL and auth token:
+
+```toml
+[providers.company-gh]
+provider_type = "github"                        # github | gitlab | gitea | artifactory
+api_url = "https://github.example.com/api/v3"  # API base URL
+token_env = "GHE_TOKEN"                         # Env var holding auth token
+
+[artifacts.internal-lib]
+github = "org/internal-lib"
+version = ">=1.0.0"
+path = "vendor/internal-lib"
+provider = "company-gh"                         # Uses the GHE instance above
+```
+
+Without a `provider` field, built-in defaults are used:
+
+| Source type | Default API URL | Default token env |
+|---|---|---|
+| `github` | `https://api.github.com` | `GITHUB_TOKEN` |
+| `gitlab` | `https://gitlab.com` | `GITLAB_TOKEN` |
+| `gitea` | `https://gitea.com` | `GITEA_TOKEN` |
+| `artifactory` | `ARTIFACTORY_URL` env | `ARTIFACTORY_TOKEN` |
+
+Provider resolution (`Config::resolve_provider()`) merges the named provider config with the source type to produce a `ResolvedProvider { provider_type, api_url, token }` that is passed to the appropriate provider implementation.
 
 ### Download Engine
 

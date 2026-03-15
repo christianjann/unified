@@ -14,6 +14,8 @@ pub struct Config {
     pub workspace: Workspace,
     pub settings: Option<Settings>,
     #[serde(default)]
+    pub providers: HashMap<String, Provider>,
+    #[serde(default)]
     pub repos: HashMap<String, Repo>,
     #[serde(default)]
     pub artifacts: HashMap<String, Artifact>,
@@ -27,6 +29,27 @@ pub struct Config {
     pub launcher: Option<Launcher>,
     #[serde(default)]
     pub collections: HashMap<String, Collection>,
+}
+
+/// The type of a release provider.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderType {
+    Github,
+    Gitlab,
+    Gitea,
+    Artifactory,
+}
+
+/// A configured release provider instance (e.g. GitHub Enterprise, self-hosted GitLab).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Provider {
+    #[serde(rename = "type")]
+    pub provider_type: ProviderType,
+    /// API base URL (e.g. "https://github.mycompany.com/api/v3")
+    pub api_url: String,
+    /// Name of the environment variable holding the auth token
+    pub token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -76,16 +99,22 @@ pub struct Repo {
     pub shallow: Option<bool>,
 }
 
-/// An artifact to download from a provider (GitHub Releases, Artifactory, or direct URL).
+/// An artifact to download from a provider (GitHub Releases, GitLab, Gitea, Artifactory, or direct URL).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Artifact {
     /// GitHub Releases source: "owner/repo"
     pub github: Option<String>,
+    /// GitLab Releases source: "group/project" (or numeric project ID)
+    pub gitlab: Option<String>,
+    /// Gitea/Forgejo Releases source: "owner/repo"
+    pub gitea: Option<String>,
     /// Artifactory path
     pub artifactory: Option<String>,
     /// Direct URL
     pub url: Option<String>,
-    /// Semver version requirement (for github/artifactory)
+    /// Named provider from [providers] (overrides default public instance)
+    pub provider: Option<String>,
+    /// Semver version requirement (for github/gitlab/gitea/artifactory)
     pub version: Option<String>,
     /// Local workspace path to place the artifact
     pub path: String,
@@ -101,10 +130,16 @@ pub struct Artifact {
 pub struct Tool {
     /// GitHub Releases source: "owner/repo"
     pub github: Option<String>,
+    /// GitLab Releases source: "group/project"
+    pub gitlab: Option<String>,
+    /// Gitea/Forgejo Releases source: "owner/repo"
+    pub gitea: Option<String>,
     /// Artifactory path
     pub artifactory: Option<String>,
     /// Direct URL
     pub url: Option<String>,
+    /// Named provider from [providers]
+    pub provider: Option<String>,
     /// Semver version requirement
     pub version: Option<String>,
     /// Environment variables set during `un run`
@@ -120,10 +155,16 @@ pub struct Tool {
 pub struct App {
     /// GitHub Releases source: "owner/repo"
     pub github: Option<String>,
+    /// GitLab Releases source: "group/project"
+    pub gitlab: Option<String>,
+    /// Gitea/Forgejo Releases source: "owner/repo"
+    pub gitea: Option<String>,
     /// Artifactory path
     pub artifactory: Option<String>,
     /// Direct URL
     pub url: Option<String>,
+    /// Named provider from [providers]
+    pub provider: Option<String>,
     /// Semver version requirement
     pub version: Option<String>,
     /// Human-readable description
@@ -176,47 +217,136 @@ pub struct LauncherEntry {
     pub icon: Option<String>,
 }
 
-/// Downloadable item source — resolved from github/artifactory/url fields.
+/// Downloadable item source — resolved from github/gitlab/gitea/artifactory/url fields.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DownloadSource {
     GitHub { owner_repo: String },
+    GitLab { project: String },
+    Gitea { owner_repo: String },
     Artifactory { path: String },
     Url { url: String },
+}
+
+/// A fully resolved provider with API URL and optional token.
+#[derive(Debug, Clone)]
+pub struct ResolvedProvider {
+    pub provider_type: ProviderType,
+    pub api_url: String,
+    pub token: Option<String>,
+}
+
+impl Config {
+    /// Resolve a provider reference to a concrete API URL + token.
+    /// Built-in defaults: "github" → api.github.com, "gitlab" → gitlab.com,
+    /// "artifactory" uses ARTIFACTORY_URL env.
+    pub fn resolve_provider(
+        &self,
+        provider_name: Option<&str>,
+        source: &DownloadSource,
+    ) -> ResolvedProvider {
+        // If an explicit provider name is given, look it up
+        if let Some(name) = provider_name
+            && let Some(p) = self.providers.get(name) {
+                let token = p
+                    .token_env
+                    .as_deref()
+                    .and_then(|env| std::env::var(env).ok());
+                return ResolvedProvider {
+                    provider_type: p.provider_type.clone(),
+                    api_url: p.api_url.clone(),
+                    token,
+                };
+            }
+
+        // Fall back to built-in defaults based on source type
+        match source {
+            DownloadSource::GitHub { .. } => ResolvedProvider {
+                provider_type: ProviderType::Github,
+                api_url: "https://api.github.com".to_string(),
+                token: std::env::var("GITHUB_TOKEN").ok(),
+            },
+            DownloadSource::GitLab { .. } => ResolvedProvider {
+                provider_type: ProviderType::Gitlab,
+                api_url: "https://gitlab.com".to_string(),
+                token: std::env::var("GITLAB_TOKEN").ok(),
+            },
+            DownloadSource::Gitea { .. } => ResolvedProvider {
+                provider_type: ProviderType::Gitea,
+                api_url: "https://gitea.com".to_string(),
+                token: std::env::var("GITEA_TOKEN").ok(),
+            },
+            DownloadSource::Artifactory { .. } => ResolvedProvider {
+                provider_type: ProviderType::Artifactory,
+                api_url: std::env::var("ARTIFACTORY_URL")
+                    .unwrap_or_else(|_| "https://artifactory.example.com".to_string()),
+                token: std::env::var("ARTIFACTORY_TOKEN").ok(),
+            },
+            DownloadSource::Url { .. } => ResolvedProvider {
+                provider_type: ProviderType::Github, // unused for direct URLs
+                api_url: String::new(),
+                token: None,
+            },
+        }
+    }
 }
 
 impl Artifact {
     pub fn source(&self) -> Option<DownloadSource> {
         if let Some(ref gh) = self.github {
-            Some(DownloadSource::GitHub {
-                owner_repo: gh.clone(),
-            })
+            Some(DownloadSource::GitHub { owner_repo: gh.clone() })
+        } else if let Some(ref gl) = self.gitlab {
+            Some(DownloadSource::GitLab { project: gl.clone() })
+        } else if let Some(ref gt) = self.gitea {
+            Some(DownloadSource::Gitea { owner_repo: gt.clone() })
         } else if let Some(ref art) = self.artifactory {
             Some(DownloadSource::Artifactory { path: art.clone() })
-        } else { self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() }) }
+        } else {
+            self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() })
+        }
+    }
+
+    pub fn provider_name(&self) -> Option<&str> {
+        self.provider.as_deref()
     }
 }
 
 impl Tool {
     pub fn source(&self) -> Option<DownloadSource> {
         if let Some(ref gh) = self.github {
-            Some(DownloadSource::GitHub {
-                owner_repo: gh.clone(),
-            })
+            Some(DownloadSource::GitHub { owner_repo: gh.clone() })
+        } else if let Some(ref gl) = self.gitlab {
+            Some(DownloadSource::GitLab { project: gl.clone() })
+        } else if let Some(ref gt) = self.gitea {
+            Some(DownloadSource::Gitea { owner_repo: gt.clone() })
         } else if let Some(ref art) = self.artifactory {
             Some(DownloadSource::Artifactory { path: art.clone() })
-        } else { self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() }) }
+        } else {
+            self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() })
+        }
+    }
+
+    pub fn provider_name(&self) -> Option<&str> {
+        self.provider.as_deref()
     }
 }
 
 impl App {
     pub fn source(&self) -> Option<DownloadSource> {
         if let Some(ref gh) = self.github {
-            Some(DownloadSource::GitHub {
-                owner_repo: gh.clone(),
-            })
+            Some(DownloadSource::GitHub { owner_repo: gh.clone() })
+        } else if let Some(ref gl) = self.gitlab {
+            Some(DownloadSource::GitLab { project: gl.clone() })
+        } else if let Some(ref gt) = self.gitea {
+            Some(DownloadSource::Gitea { owner_repo: gt.clone() })
         } else if let Some(ref art) = self.artifactory {
             Some(DownloadSource::Artifactory { path: art.clone() })
-        } else { self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() }) }
+        } else {
+            self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() })
+        }
+    }
+
+    pub fn provider_name(&self) -> Option<&str> {
+        self.provider.as_deref()
     }
 }
 
@@ -502,6 +632,7 @@ mod tests {
                 manage_gitignore: Some(false),
                 manage_vscode: Some(false),
             }),
+            providers: HashMap::new(),
             repos: HashMap::new(),
             artifacts: HashMap::new(),
             tools: HashMap::new(),
@@ -606,6 +737,7 @@ mod tests {
                 exclude: None,
             },
             settings: None,
+            providers: HashMap::new(),
             repos,
             artifacts: HashMap::new(),
             tools: HashMap::new(),
@@ -651,6 +783,7 @@ mod tests {
                 exclude: None,
             },
             settings: None,
+            providers: HashMap::new(),
             repos,
             artifacts: HashMap::new(),
             tools: HashMap::new(),
@@ -713,6 +846,7 @@ mod tests {
                 exclude: None,
             },
             settings: None,
+            providers: HashMap::new(),
             repos,
             artifacts: HashMap::new(),
             tools: HashMap::new(),
