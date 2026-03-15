@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use glob::Pattern;
+use indicatif::ProgressBar;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use un_cache::Cache;
 use un_core::GitReference;
 
@@ -114,9 +117,10 @@ impl GitDatabase {
         reference: &GitReference,
         shallow: bool,
         _use_cli: bool,
+        pb: Option<&ProgressBar>,
     ) -> Result<String> {
         // Always use CLI for now (gix integration deferred)
-        self.fetch_with_cli(remote, reference, shallow)?;
+        self.fetch_with_cli(remote, reference, shallow, pb)?;
         self.resolve_oid(reference)
     }
 
@@ -125,21 +129,68 @@ impl GitDatabase {
         remote: &GitRemote,
         reference: &GitReference,
         shallow: bool,
+        pb: Option<&ProgressBar>,
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("fetch").arg(remote.url());
+        cmd.arg("fetch").arg("--progress").arg(remote.url());
         if shallow {
             cmd.args(["--depth", "1"]);
         }
         for refspec in &remote.refspecs_for(reference) {
             cmd.arg(refspec);
         }
-        let status = cmd
-            .current_dir(&self.path)
-            .status()
-            .context("failed to run `git fetch` — is git installed?")?;
-        if !status.success() {
-            anyhow::bail!("git fetch failed for {}", remote.url());
+
+        // If we have a progress bar, capture stderr and parse git progress.
+        // Git outputs progress on stderr.
+        if let Some(pb) = pb {
+            cmd.current_dir(&self.path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+
+            let mut child = cmd.spawn()
+                .context("failed to run `git fetch` — is git installed?")?;
+
+            let stderr = child.stderr.take().unwrap();
+            let reader = BufReader::new(stderr);
+
+            // Git progress lines use \r to overwrite. Read byte-by-byte to handle \r.
+            let mut line_buf = String::new();
+            let mut bytes_reader = reader;
+            let mut byte = [0u8; 1];
+            loop {
+                use std::io::Read;
+                match bytes_reader.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if byte[0] == b'\r' || byte[0] == b'\n' {
+                            if !line_buf.is_empty() {
+                                parse_git_progress(&line_buf, pb);
+                                line_buf.clear();
+                            }
+                        } else {
+                            line_buf.push(byte[0] as char);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !line_buf.is_empty() {
+                parse_git_progress(&line_buf, pb);
+            }
+
+            let status = child.wait()
+                .context("failed to wait for `git fetch`")?;
+            if !status.success() {
+                anyhow::bail!("git fetch failed for {}", remote.url());
+            }
+        } else {
+            let status = cmd
+                .current_dir(&self.path)
+                .status()
+                .context("failed to run `git fetch` — is git installed?")?;
+            if !status.success() {
+                anyhow::bail!("git fetch failed for {}", remote.url());
+            }
         }
         Ok(())
     }
@@ -166,6 +217,68 @@ impl GitDatabase {
                 stderr.trim()
             ))
         }
+    }
+}
+
+/// Parse a git progress line and update the progress bar.
+/// Git progress looks like:
+///   "remote: Enumerating objects: 42, done."
+///   "remote: Counting objects:  50% (21/42)"
+///   "remote: Compressing objects: 100% (15/15), done."
+///   "Receiving objects:  33% (14/42), 1.20 MiB | 640.00 KiB/s"
+///   "Resolving deltas: 100% (8/8), done."
+fn parse_git_progress(line: &str, pb: &ProgressBar) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+
+    // Strip "remote: " prefix if present
+    let text = line.strip_prefix("remote: ").unwrap_or(line);
+
+    // Try to extract phase and percentage: "Phase:  XX% (n/total)"
+    if let Some(pct_pos) = text.find('%') {
+        // Walk back to find the start of the number
+        let before_pct = &text[..pct_pos];
+        let num_start = before_pct
+            .rfind(|c: char| !c.is_ascii_digit())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if let Ok(pct) = before_pct[num_start..].parse::<u64>() {
+            // Extract phase name (before the colon)
+            let phase = text.split(':').next().unwrap_or(text).trim();
+
+            // Try to extract total from (n/total)
+            if let Some(slash_pos) = text.find('/') {
+                let after_slash = &text[slash_pos + 1..];
+                let total_end = after_slash
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after_slash.len());
+                if let Ok(total) = after_slash[..total_end].parse::<u64>() {
+                    if pb.length().unwrap_or(0) != total {
+                        pb.set_length(total);
+                    }
+                    let pos = total * pct / 100;
+                    pb.set_position(pos);
+                }
+            }
+
+            // Extract speed info if present (e.g. "| 640.00 KiB/s")
+            let speed_info = text
+                .find('|')
+                .map(|i| text[i + 1..].trim())
+                .unwrap_or("");
+
+            if speed_info.is_empty() {
+                pb.set_message(format!("{} {}%", phase, pct));
+            } else {
+                pb.set_message(format!("{} {}% ({})", phase, pct, speed_info));
+            }
+        }
+    } else if text.contains("done") {
+        // Phase completed
+        let phase = text.split(':').next().unwrap_or(text).trim();
+        pb.set_message(format!("{} done", phase));
     }
 }
 

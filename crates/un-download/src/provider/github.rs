@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
+use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use super::{Release, ReleaseAsset};
+use super::{read_response_with_progress, Release, ReleaseAsset};
 
 /// Parses the GitHub `Link` header to extract the "next" page URL.
 fn parse_next_link(link_header: &str) -> Option<String> {
@@ -93,6 +94,7 @@ impl GitHubProvider {
         client: &reqwest::blocking::Client,
         url: &str,
         token: Option<&str>,
+        pb: Option<&ProgressBar>,
     ) -> Result<Vec<u8>> {
         let mut builder = client
             .get(url)
@@ -112,8 +114,7 @@ impl GitHubProvider {
             anyhow::bail!("GitHub returned {} for {}", status, url);
         }
 
-        let bytes = response.bytes()?;
-        Ok(bytes.to_vec())
+        read_response_with_progress(response, pb)
     }
 }
 

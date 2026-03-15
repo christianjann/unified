@@ -459,8 +459,18 @@ fn cmd_sync(
 
     // Set up progress display
     let multi = MultiProgress::new();
-    let style = ProgressStyle::with_template("{prefix:.bold} {spinner} {msg}")
-        .unwrap_or_else(|_| ProgressStyle::default_spinner());
+    let spinner_style = ProgressStyle::with_template(
+        "{prefix:.bold.cyan} {spinner:.green} {msg}",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_spinner())
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]);
+
+    let bar_style = ProgressStyle::with_template(
+        "{prefix:.bold.cyan} {spinner:.green} {msg}\n    {bar:40.green/dim} {pos}/{len} {elapsed_precise}",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar())
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"])
+    .progress_chars("━╸─");
 
     // Process repos in parallel batches
     let locked_repos = Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -478,9 +488,11 @@ fn cmd_sync(
             let locked_repos = Arc::clone(&locked_repos);
             let errors = Arc::clone(&errors);
             let pb = multi.add(ProgressBar::new_spinner());
-            pb.set_style(style.clone());
+            pb.set_style(spinner_style.clone());
             pb.set_prefix(name.clone());
             pb.set_message("fetching...");
+            pb.enable_steady_tick(std::time::Duration::from_millis(80));
+            let bar_style_clone = bar_style.clone();
 
             let shallow = resolve_shallow(
                 cli_shallow,
@@ -493,10 +505,18 @@ fn cmd_sync(
 
             handles.push(thread::spawn(move || {
                 let result =
-                    sync_single_repo(&name, &repo, &cache, shallow, git_fetch_with_cli, &pb);
+                    sync_single_repo(&name, &repo, &cache, shallow, git_fetch_with_cli, &pb, &bar_style_clone);
                 match result {
                     Ok((oid, reference)) => {
-                        pb.finish_with_message("done ✓");
+                        pb.set_style(
+                            ProgressStyle::with_template("{prefix:.bold.green} {msg:.green}")
+                                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+                        );
+                        pb.finish_with_message(format!(
+                            "done ✓ → {} @ {}",
+                            repo.path,
+                            &oid[..12.min(oid.len())]
+                        ));
                         locked_repos.lock().unwrap().insert(
                             name.clone(),
                             LockedRepo {
@@ -507,7 +527,11 @@ fn cmd_sync(
                         );
                     }
                     Err(e) => {
-                        pb.finish_with_message(format!("FAILED: {}", e));
+                        pb.set_style(
+                            ProgressStyle::with_template("{prefix:.bold.red} {msg:.red}")
+                                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+                        );
+                        pb.finish_with_message(format!("✗ {}", e));
                         errors.lock().unwrap().push(format!("{}: {}", name, e));
                     }
                 }
@@ -554,6 +578,7 @@ fn cmd_sync(
                 )
             })
             .collect::<Vec<_>>(),
+        &multi,
     )?;
 
     let active_tools = config.tools_for_collection(active_collection.as_deref())?;
@@ -577,6 +602,7 @@ fn cmd_sync(
                 )
             })
             .collect::<Vec<_>>(),
+        &multi,
     )?;
     let locked_tools: std::collections::HashMap<String, LockedTool> = locked_tools_raw
         .into_iter()
@@ -613,6 +639,7 @@ fn cmd_sync(
                 )
             })
             .collect::<Vec<_>>(),
+        &multi,
     )?;
     let locked_apps: std::collections::HashMap<String, LockedApp> = locked_apps_raw
         .into_iter()
@@ -711,21 +738,24 @@ fn sync_single_repo(
     shallow: bool,
     git_fetch_with_cli: bool,
     pb: &ProgressBar,
+    bar_style: &ProgressStyle,
 ) -> Result<(String, GitReference), Box<dyn std::error::Error + Send + Sync>> {
     let remote = GitRemote::new(&repo.url);
     let database = GitDatabase::new(cache, name, &repo.url)?;
     let reference = resolve_reference(repo);
 
     pb.set_message("fetching...");
-    let oid = database.fetch(&remote, &reference, shallow, git_fetch_with_cli)?;
+    // Switch to bar style for fetch progress (git provides object counts)
+    pb.set_style(bar_style.clone());
+    let oid = database.fetch(&remote, &reference, shallow, git_fetch_with_cli, Some(pb))?;
+    // Switch back to spinner after fetch completes
+    pb.set_length(0);
 
     let workspace_path = std::env::current_dir()?.join(&repo.path);
     let mode = resolve_checkout_mode(repo);
 
     // Skip checkout if already checked out at the correct oid
     if workspace_path.exists() && un_git::has_ok_marker(&workspace_path) {
-        // Read the marker to see if oid matches — for now, re-checkout
-        // A future optimization: store oid in marker and skip if unchanged
         pb.set_message("already checked out, skipping");
     } else {
         pb.set_message("checking out...");
@@ -734,7 +764,6 @@ fn sync_single_repo(
     }
 
     pb.set_message(format!("done ({})", &oid[..8.min(oid.len())]));
-    println!("  {} → {} @ {}", name, repo.path, &oid[..12.min(oid.len())]);
     Ok((oid, reference))
 }
 
@@ -830,6 +859,7 @@ fn cmd_update(
             &reference,
             shallow,
             settings.git_fetch_with_cli.unwrap_or(false),
+            None,
         )?;
 
         let old_oid = existing_lock
@@ -1484,8 +1514,28 @@ fn sync_downloadables(
     cache: &Cache,
     category: &str,
     items: &[DownloadSpec<'_>],
+    multi: &MultiProgress,
 ) -> Result<std::collections::HashMap<String, LockedArtifact>, Box<dyn std::error::Error>> {
     let mut locked = std::collections::HashMap::new();
+
+    let download_style = ProgressStyle::with_template(
+        "{prefix:.bold.cyan} {spinner:.green} {msg}\n    {bar:40.green/dim} {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar())
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"])
+    .progress_chars("━╸─");
+
+    let spinner_style = ProgressStyle::with_template(
+        "{prefix:.bold.cyan} {spinner:.green} {msg}",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_spinner())
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]);
+
+    let done_style = ProgressStyle::with_template("{prefix:.bold.green} {msg:.green}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner());
+
+    let cached_style = ProgressStyle::with_template("{prefix:.bold.dim} {msg:.dim}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner());
 
     for &(name, ref source, provider_name, version_str, expected_sha256, platform_map, _workspace_path) in items {
         let Some(source) = source else {
@@ -1501,6 +1551,12 @@ fn sync_downloadables(
                 let version_req = semver::VersionReq::parse(version_req_str).map_err(|e| {
                     format!("invalid version requirement '{}' for {}: {}", version_req_str, name, e)
                 })?;
+
+                let pb = multi.add(ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_prefix(name.to_string());
+                pb.enable_steady_tick(std::time::Duration::from_millis(80));
+                pb.set_message("resolving releases...");
 
                 let releases = match resolved.provider_type {
                     ProviderType::Gitea => GiteaProvider::get_releases(
@@ -1523,31 +1579,28 @@ fn sync_downloadables(
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
                 if cache_dir.exists() {
-                    println!(
-                        "  Cached    {} v{} (already downloaded)",
-                        name, chosen.version
-                    );
+                    pb.set_style(cached_style.clone());
+                    pb.finish_with_message(format!("v{} (cached)", chosen.version));
                 } else {
                     let type_label = match resolved.provider_type {
                         ProviderType::Gitea => "Gitea",
                         _ => "GitHub",
                     };
-                    println!(
-                        "  Download  {} v{} ({}: {})",
-                        name, chosen.version, type_label, owner_repo
-                    );
+                    pb.set_message(format!("downloading v{} ({}: {})...", chosen.version, type_label, owner_repo));
+                    pb.set_style(download_style.clone());
                     let data = match resolved.provider_type {
                         ProviderType::Gitea => GiteaProvider::download_asset(
-                            engine.client(), &chosen.url, resolved.token.as_deref(),
+                            engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                         )?,
                         _ => GitHubProvider::download_asset(
-                            engine.client(), &chosen.url, resolved.token.as_deref(),
+                            engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                         )?,
                     };
                     let sha = DownloadEngine::sha256(&data);
 
                     if let Some(expected) = expected_sha256
                         && sha != expected {
+                            pb.finish_with_message("✗ SHA-256 mismatch".to_string());
                             return Err(format!(
                                 "SHA-256 mismatch for {}: expected {}, got {}",
                                 name, expected, sha
@@ -1555,7 +1608,10 @@ fn sync_downloadables(
                             .into());
                         }
 
+                    pb.set_message("extracting...");
                     un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                    pb.set_style(done_style.clone());
+                    pb.finish_with_message(format!("v{} ✓", chosen.version));
                 }
 
                 let sha = expected_sha256.unwrap_or("").to_string();
@@ -1579,6 +1635,12 @@ fn sync_downloadables(
                     format!("invalid version requirement '{}' for {}: {}", version_req_str, name, e)
                 })?;
 
+                let pb = multi.add(ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_prefix(name.to_string());
+                pb.enable_steady_tick(std::time::Duration::from_millis(80));
+                pb.set_message("resolving releases...");
+
                 let releases = GitLabProvider::get_releases(
                     engine.client(), &resolved.api_url, project, resolved.token.as_deref(),
                 )?;
@@ -1594,22 +1656,19 @@ fn sync_downloadables(
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
                 if cache_dir.exists() {
-                    println!(
-                        "  Cached    {} v{} (already downloaded)",
-                        name, chosen.version
-                    );
+                    pb.set_style(cached_style.clone());
+                    pb.finish_with_message(format!("v{} (cached)", chosen.version));
                 } else {
-                    println!(
-                        "  Download  {} v{} (GitLab: {})",
-                        name, chosen.version, project
-                    );
+                    pb.set_message(format!("downloading v{} (GitLab: {})...", chosen.version, project));
+                    pb.set_style(download_style.clone());
                     let data = GitLabProvider::download_asset(
-                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                     )?;
                     let sha = DownloadEngine::sha256(&data);
 
                     if let Some(expected) = expected_sha256
                         && sha != expected {
+                            pb.finish_with_message("✗ SHA-256 mismatch".to_string());
                             return Err(format!(
                                 "SHA-256 mismatch for {}: expected {}, got {}",
                                 name, expected, sha
@@ -1617,7 +1676,10 @@ fn sync_downloadables(
                             .into());
                         }
 
+                    pb.set_message("extracting...");
                     un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                    pb.set_style(done_style.clone());
+                    pb.finish_with_message(format!("v{} ✓", chosen.version));
                 }
 
                 let sha = expected_sha256.unwrap_or("").to_string();
@@ -1637,6 +1699,12 @@ fn sync_downloadables(
                     format!("invalid version requirement '{}' for {}: {}", version_req_str, name, e)
                 })?;
 
+                let pb = multi.add(ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_prefix(name.to_string());
+                pb.enable_steady_tick(std::time::Duration::from_millis(80));
+                pb.set_message("resolving releases...");
+
                 let releases = ArtifactoryProvider::get_releases(
                     engine.client(), &resolved.api_url, path, resolved.token.as_deref(),
                 )?;
@@ -1652,22 +1720,19 @@ fn sync_downloadables(
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
                 if cache_dir.exists() {
-                    println!(
-                        "  Cached    {} v{} (already downloaded)",
-                        name, chosen.version
-                    );
+                    pb.set_style(cached_style.clone());
+                    pb.finish_with_message(format!("v{} (cached)", chosen.version));
                 } else {
-                    println!(
-                        "  Download  {} v{} (Artifactory: {})",
-                        name, chosen.version, path
-                    );
+                    pb.set_message(format!("downloading v{} (Artifactory: {})...", chosen.version, path));
+                    pb.set_style(download_style.clone());
                     let data = ArtifactoryProvider::download_asset(
-                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                     )?;
                     let sha = DownloadEngine::sha256(&data);
 
                     if let Some(expected) = expected_sha256
                         && sha != expected {
+                            pb.finish_with_message("✗ SHA-256 mismatch".to_string());
                             return Err(format!(
                                 "SHA-256 mismatch for {}: expected {}, got {}",
                                 name, expected, sha
@@ -1675,7 +1740,10 @@ fn sync_downloadables(
                             .into());
                         }
 
+                    pb.set_message("extracting...");
                     un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                    pb.set_style(done_style.clone());
+                    pb.finish_with_message(format!("v{} ✓", chosen.version));
                 }
 
                 let sha = expected_sha256.unwrap_or("").to_string();
@@ -1693,18 +1761,28 @@ fn sync_downloadables(
                 // Direct URL — no version resolution, just download
                 let cache_dir = DownloadEngine::cache_path(cache, category, name, "latest");
 
+                let pb = multi.add(ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_prefix(name.to_string());
+                pb.enable_steady_tick(std::time::Duration::from_millis(80));
+
                 if cache_dir.exists() {
-                    println!("  Cached    {} (already downloaded)", name);
+                    pb.set_style(cached_style.clone());
+                    pb.finish_with_message("(cached)".to_string());
                 } else {
-                    println!("  Download  {} ({})", name, url);
-                    let data = HttpProvider::download(engine, url, expected_sha256)?;
+                    pb.set_message(format!("downloading {}...", url));
+                    pb.set_style(download_style.clone());
+                    let data = HttpProvider::download_with_progress(engine, url, expected_sha256, &pb)?;
 
                     // Infer filename from URL
                     let filename = url
                         .rsplit('/')
                         .next()
                         .unwrap_or("download");
+                    pb.set_message("extracting...");
                     un_download::extract_archive(&data, filename, &cache_dir)?;
+                    pb.set_style(done_style.clone());
+                    pb.finish_with_message("✓".to_string());
                 }
 
                 let sha = expected_sha256.unwrap_or("").to_string();
@@ -1770,6 +1848,22 @@ fn copy_dir_recursive(
     Ok(())
 }
 
+/// Create a standalone progress bar for one-off asset downloads.
+fn oneoff_download_bar(name: &str) -> ProgressBar {
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{prefix:.bold.cyan} {spinner:.green} {msg}\n  {bar:40.green/dim} {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"])
+        .progress_chars("━╸─"),
+    );
+    pb.set_prefix(name.to_string());
+    pb.enable_steady_tick(std::time::Duration::from_millis(80));
+    pb
+}
+
 /// Ensure a tool is downloaded and return the path to its cache directory.
 fn ensure_tool_downloaded(
     name: &str,
@@ -1804,16 +1898,19 @@ fn ensure_tool_downloaded(
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
             if !cache_dir.exists() {
-                println!("  Downloading {} v{}...", name, chosen.version);
+                let pb = oneoff_download_bar(name);
+                pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = match resolved.provider_type {
                     ProviderType::Gitea => GiteaProvider::download_asset(
-                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                     )?,
                     _ => GitHubProvider::download_asset(
-                        engine.client(), &chosen.url, resolved.token.as_deref(),
+                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                     )?,
                 };
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                pb.finish_with_message(format!("v{} ✓", chosen.version));
             }
             Ok((cache_dir, chosen.version))
         }
@@ -1834,11 +1931,14 @@ fn ensure_tool_downloaded(
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
             if !cache_dir.exists() {
-                println!("  Downloading {} v{}...", name, chosen.version);
+                let pb = oneoff_download_bar(name);
+                pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = GitLabProvider::download_asset(
-                    engine.client(), &chosen.url, resolved.token.as_deref(),
+                    engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                 )?;
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                pb.finish_with_message(format!("v{} ✓", chosen.version));
             }
             Ok((cache_dir, chosen.version))
         }
@@ -1859,21 +1959,27 @@ fn ensure_tool_downloaded(
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
             if !cache_dir.exists() {
-                println!("  Downloading {} v{}...", name, chosen.version);
+                let pb = oneoff_download_bar(name);
+                pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = ArtifactoryProvider::download_asset(
-                    engine.client(), &chosen.url, resolved.token.as_deref(),
+                    engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
                 )?;
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                pb.finish_with_message(format!("v{} ✓", chosen.version));
             }
             Ok((cache_dir, chosen.version))
         }
         DownloadSource::Url { url } => {
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, "latest");
             if !cache_dir.exists() {
-                println!("  Downloading {}...", name);
-                let data = HttpProvider::download(&engine, &url, None)?;
+                let pb = oneoff_download_bar(name);
+                pb.set_message("downloading...");
+                let data = HttpProvider::download_with_progress(&engine, &url, None, &pb)?;
                 let filename = url.rsplit('/').next().unwrap_or("download");
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, filename, &cache_dir)?;
+                pb.finish_with_message("✓");
             }
             Ok((cache_dir, "latest".to_string()))
         }
@@ -2087,16 +2193,19 @@ fn cmd_app(app_name: &str) -> Result<(), Box<dyn std::error::Error>> {
                     })?;
             let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &chosen.version);
             if !dir.exists() {
-                println!("  Downloading {} v{}...", app_name, chosen.version);
+                let pb = oneoff_download_bar(app_name);
+                pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = match resolved_provider.provider_type {
                     ProviderType::Gitea => GiteaProvider::download_asset(
-                        engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                        engine.client(), &chosen.url, resolved_provider.token.as_deref(), Some(&pb),
                     )?,
                     _ => GitHubProvider::download_asset(
-                        engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                        engine.client(), &chosen.url, resolved_provider.token.as_deref(), Some(&pb),
                     )?,
                 };
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, &chosen.asset_name, &dir)?;
+                pb.finish_with_message(format!("v{} ✓", chosen.version));
             }
             (dir, chosen.version)
         }
@@ -2113,11 +2222,14 @@ fn cmd_app(app_name: &str) -> Result<(), Box<dyn std::error::Error>> {
                     })?;
             let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &chosen.version);
             if !dir.exists() {
-                println!("  Downloading {} v{}...", app_name, chosen.version);
+                let pb = oneoff_download_bar(app_name);
+                pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = GitLabProvider::download_asset(
-                    engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                    engine.client(), &chosen.url, resolved_provider.token.as_deref(), Some(&pb),
                 )?;
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, &chosen.asset_name, &dir)?;
+                pb.finish_with_message(format!("v{} ✓", chosen.version));
             }
             (dir, chosen.version)
         }
@@ -2134,21 +2246,27 @@ fn cmd_app(app_name: &str) -> Result<(), Box<dyn std::error::Error>> {
                     })?;
             let dir = DownloadEngine::cache_path(&cache, "apps", app_name, &chosen.version);
             if !dir.exists() {
-                println!("  Downloading {} v{}...", app_name, chosen.version);
+                let pb = oneoff_download_bar(app_name);
+                pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = ArtifactoryProvider::download_asset(
-                    engine.client(), &chosen.url, resolved_provider.token.as_deref(),
+                    engine.client(), &chosen.url, resolved_provider.token.as_deref(), Some(&pb),
                 )?;
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, &chosen.asset_name, &dir)?;
+                pb.finish_with_message(format!("v{} ✓", chosen.version));
             }
             (dir, chosen.version)
         }
         DownloadSource::Url { ref url } => {
             let dir = DownloadEngine::cache_path(&cache, "apps", app_name, "latest");
             if !dir.exists() {
-                println!("  Downloading {}...", app_name);
-                let data = HttpProvider::download(&engine, url, None)?;
+                let pb = oneoff_download_bar(app_name);
+                pb.set_message("downloading...");
+                let data = HttpProvider::download_with_progress(&engine, url, None, &pb)?;
                 let filename = url.rsplit('/').next().unwrap_or("download");
+                pb.set_message("extracting...");
                 un_download::extract_archive(&data, filename, &dir)?;
+                pb.finish_with_message("✓");
             }
             (dir, "latest".to_string())
         }

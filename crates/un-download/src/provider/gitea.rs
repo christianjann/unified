@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
+use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use super::{Release, ReleaseAsset};
+use super::{read_response_with_progress, Release, ReleaseAsset};
 
 pub struct GiteaProvider;
 
@@ -69,6 +70,7 @@ impl GiteaProvider {
         client: &reqwest::blocking::Client,
         url: &str,
         token: Option<&str>,
+        pb: Option<&ProgressBar>,
     ) -> Result<Vec<u8>> {
         let mut builder = client
             .get(url)
@@ -87,8 +89,7 @@ impl GiteaProvider {
             anyhow::bail!("Gitea returned {} for {}", status, url);
         }
 
-        let bytes = response.bytes()?;
-        Ok(bytes.to_vec())
+        read_response_with_progress(response, pb)
     }
 }
 

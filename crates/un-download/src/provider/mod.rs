@@ -5,8 +5,10 @@ pub mod gitlab;
 pub mod http;
 
 use anyhow::Result;
+use indicatif::ProgressBar;
 use semver::Version;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 
 use crate::platform;
 use un_cache::Cache;
@@ -199,6 +201,40 @@ fn find_platform_asset(
     }
 
     None
+}
+
+/// Read a response body with progress bar updates.
+/// If `Content-Length` is available, shows a proper byte progress bar.
+/// Otherwise, shows bytes downloaded as a counter.
+pub fn read_response_with_progress(
+    mut response: reqwest::blocking::Response,
+    pb: Option<&ProgressBar>,
+) -> Result<Vec<u8>> {
+    let content_length = response.content_length();
+
+    if let Some(pb) = pb {
+        if let Some(total) = content_length {
+            pb.set_length(total);
+        }
+
+        let mut buf = Vec::with_capacity(content_length.unwrap_or(8192) as usize);
+        let mut chunk = [0u8; 8192];
+        loop {
+            match response.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    pb.set_position(buf.len() as u64);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(buf)
+    } else {
+        let bytes = response.bytes()?;
+        Ok(bytes.to_vec())
+    }
 }
 
 #[cfg(test)]
