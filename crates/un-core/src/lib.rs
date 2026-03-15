@@ -123,6 +123,9 @@ pub struct Artifact {
     /// Platform-specific asset name mappings
     #[serde(default)]
     pub platform: HashMap<String, String>,
+    /// Whether to extract the archive in the workspace (default: true).
+    /// When false, the raw downloaded file is placed as-is.
+    pub extract: Option<bool>,
 }
 
 /// A tool that can be downloaded and executed via `un run`.
@@ -378,6 +381,9 @@ pub struct LockedArtifact {
     pub version: String,
     pub url: String,
     pub sha256: String,
+    /// Original asset filename (used for extraction/placement)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asset_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -386,6 +392,9 @@ pub struct LockedTool {
     pub version: String,
     pub url: String,
     pub sha256: String,
+    /// Original asset filename
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asset_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -394,6 +403,9 @@ pub struct LockedApp {
     pub version: String,
     pub url: String,
     pub sha256: String,
+    /// Original asset filename
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asset_name: String,
 }
 
 impl Default for Settings {

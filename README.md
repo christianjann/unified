@@ -118,6 +118,7 @@ path = "test-data/vectors"
 url = "https://releases.example.com/firmware/v3.2.1/firmware.bin"
 sha256 = "abc123..."
 path = "binaries/firmware.bin"
+extract = false                     # Keep the raw downloaded file as-is (don't extract)
 
 [artifacts.internal-sdk]
 artifactory = "libs-release/sdk/toolchain"
@@ -273,8 +274,8 @@ un sync
 This will:
 1. Clone/fetch all git repos into `~/.unified/git/db/`
 2. Check out the specified revisions into your workspace paths
-3. Download artifacts to `~/.unified/artifacts/` and link them to workspace paths
-4. Download tools and apps to `~/.unified/tools/` and `~/.unified/apps/`
+3. Download artifacts to `~/.unified/artifacts/` (cached as raw archives) and extract them to workspace paths
+4. Download tools and apps to `~/.unified/tools/` and `~/.unified/apps/` (cached as raw archives, extracted on demand)
 5. Write `unified.lock` with pinned revisions and checksums
 6. Update `.gitignore` and `.vscode/settings.json` to exclude managed paths
 
@@ -434,6 +435,7 @@ path = "vendor/artifact"           # Local path to place artifact
 sha256 = "..."                     # Expected checksum (optional for github, required for url)
 provider = "my-provider"           # Use a custom provider from [providers] (optional)
 platform = { linux-x86_64 = "linux-amd64", macos-aarch64 = "darwin-arm64" }  # Platform mappings (optional)
+extract = true                     # Extract archive into path (default). Set false to keep the raw download.
 
 # ─── Tools ────────────────────────────────────────────────────────
 
@@ -582,18 +584,22 @@ All data is cached at `~/.unified/` (overridable via `UNIFIED_HOME` env var or `
 │       └── firmware-a1b2c3d4/
 │           └── e5f6a7b/           # Short commit hash
 ├── artifacts/
-│   └── test-vectors-d4e5f6a7/
-│       └── v1.2.0/                # Version directory
+│   └── test-vectors/
+│       └── v1.2.0/
+│           └── vectors-linux-x64.tar.gz   # Raw downloaded archive (cache)
 ├── tools/
 │   └── protoc/
 │       └── v25.1/
-│           └── protoc             # Executable
+│           ├── protoc-linux-x64.zip       # Raw downloaded archive (cache)
+│           └── content/                   # Extracted content (for un run)
+│               └── protoc                 # Executable
 ├── apps/
 │   └── clion/
-│       └── v2025.1/              # Downloaded application
+│       └── v2025.1/
+│           └── clion-linux.tar.gz         # Raw downloaded archive (cache)
 ├── bin/                           # Globally installed tool symlinks
-│   ├── protoc -> ../tools/protoc/v25.1/protoc
-│   └── buf -> ../tools/buf/v1.28.0/buf
+│   ├── protoc -> ../tools/protoc/v25.1/content/protoc
+│   └── buf -> ../tools/buf/v1.28.0/content/buf
 └── tmp/                           # In-progress downloads (cleaned on next sync)
 ```
 

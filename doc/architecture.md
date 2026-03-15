@@ -97,11 +97,11 @@ unified.toml ──→ Config ──→ Resolver ──→ Operations ──→ 
 
 4. **Execute operations** — Run git fetches and HTTP downloads in parallel (up to `settings.parallel` concurrency):
    - **Git repos**: Fetch into `~/.unified/git/db/{name}-{hash}/`, then create checkout
-   - **Artifacts**: Download to `~/.unified/artifacts/{name}-{hash}/{version}/`
-   - **Tools**: Download to `~/.unified/tools/{name}/{version}/`
-   - **Apps**: Download to `~/.unified/apps/{name}/{version}/`
+   - **Artifacts**: Download raw archive to `~/.unified/artifacts/{name}/{version}/{asset_name}`
+   - **Tools**: Download raw archive to `~/.unified/tools/{name}/{version}/{asset_name}`, extract to `content/`
+   - **Apps**: Download raw archive to `~/.unified/apps/{name}/{version}/{asset_name}`
 
-5. **Populate workspace** — Create worktrees or copy files into workspace paths specified in config.
+5. **Populate workspace** — Create worktrees or copy files into workspace paths. For artifacts: extract the cached archive into the workspace path (or symlink the raw file if `extract = false`).
 
 6. **Write lock file** — Serialize all resolved revisions and checksums to `unified.lock`.
 
@@ -442,6 +442,8 @@ platform = { linux-x86_64 = "ubuntu-22.04-x64", macos-aarch64 = "macos-universal
 
 ### Directory Layout
 
+The cache always stores the **raw downloaded archive** as the source of truth. Extraction only happens in the workspace (for artifacts) or in a `content/` subdirectory (for tools that need executables).
+
 ```
 $UNIFIED_HOME/                       # Default: ~/.unified
 ├── git/
@@ -451,19 +453,29 @@ $UNIFIED_HOME/                       # Default: ~/.unified
 │       └── {name}-{url_hash}/
 │           └── {short_rev}/          # Checked-out trees
 ├── artifacts/
-│   └── {name}-{source_hash}/
-│       └── {version}/                # Downloaded and extracted artifacts
+│   └── {name}/
+│       └── {version}/
+│           └── {asset_name}          # Raw downloaded archive (e.g. sdk-linux-x64.tar.gz)
 ├── tools/
 │   └── {name}/
 │       └── {version}/
-│           └── {binary}              # Tool executables
+│           ├── {asset_name}          # Raw downloaded archive
+│           └── content/              # Extracted content (for find_executable / un run)
+│               └── {binary}
 ├── apps/
 │   └── {name}/
-│       └── {version}/                # Downloaded applications
+│       └── {version}/
+│           └── {asset_name}          # Raw downloaded archive
 ├── bin/                              # Global tool symlinks (un tool install)
 └── tmp/                              # In-progress downloads
     └── {uuid}.partial                # Resumable partial downloads
 ```
+
+**Why raw archives in cache?**
+
+1. **Integrity** — The SHA-256 in the lock file is computed on the raw download bytes, making verification trivial and deterministic (no need to hash a directory tree).
+2. **Flexibility** — Some artifacts need the archive itself (e.g., firmware blobs, SDKs that expect a `.zip` at a known path). The `extract = false` option on artifacts places the raw file as-is.
+3. **Re-extraction without re-download** — If the workspace content is deleted, `un sync` reads the cached archive and re-extracts without hitting the network.
 
 ### Cache Key Computation
 
@@ -595,8 +607,8 @@ manage-vscode = false          # Don't touch .vscode/settings.json
 
 Tools (`[tools]`) and apps (`[apps]`) share the same download infrastructure as artifacts (Provider trait, platform detection, checksum verification). The difference is lifecycle:
 
-- **Artifacts** are placed at a workspace `path` and treated as static data.
-- **Tools** are executables cached in `~/.unified/tools/{name}/{version}/` and run via `un run <tool>`.
+- **Artifacts** are placed at a workspace `path`. By default, the cached archive is extracted into the workspace path. With `extract = false`, the raw file is symlinked/copied as-is (useful for firmware blobs, pre-built binaries, or archives that consuming tools expect in their original format).
+- **Tools** are executables cached in `~/.unified/tools/{name}/{version}/`. The raw archive is stored alongside an extracted `content/` directory. `un run <tool>` finds the executable in `content/`.
 - **Apps** are larger applications cached in `~/.unified/apps/{name}/{version}/` and launched via `un app <name>`.
 
 ### Tool Execution (`un run`)

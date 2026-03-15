@@ -669,6 +669,7 @@ fn cmd_sync(
                     version: v.version,
                     url: v.url,
                     sha256: v.sha256,
+                    asset_name: v.asset_name,
                 },
             )
         })
@@ -706,6 +707,7 @@ fn cmd_sync(
                     version: v.version,
                     url: v.url,
                     sha256: v.sha256,
+                    asset_name: v.asset_name,
                 },
             )
         })
@@ -721,7 +723,8 @@ fn cmd_sync(
                 &locked.version,
             );
             let workspace_path = std::env::current_dir()?.join(&artifact.path);
-            link_or_copy_artifact(&cache_dir, &workspace_path)?;
+            let should_extract = artifact.extract.unwrap_or(true);
+            place_artifact(&cache_dir, &locked.asset_name, &workspace_path, should_extract)?;
         }
     }
 
@@ -1611,29 +1614,30 @@ type DownloadSpec<'a> = (
     Option<&'a str>,
 );
 
-/// Check if a cache directory exists and contains at least one file.
-/// Prevents treating empty directories (from failed downloads) as cached.
-fn cache_dir_has_content(dir: &std::path::Path) -> bool {
-    dir.is_dir()
-        && std::fs::read_dir(dir)
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false)
+/// Check if a cached raw archive file exists for a given asset name.
+fn cache_has_raw_archive(dir: &std::path::Path, asset_name: &str) -> bool {
+    dir.join(asset_name).is_file()
 }
 
-/// Compute a combined SHA-256 over all files in a directory (sorted by name).
-/// Used to verify cache integrity for artifacts/tools/apps.
-fn sha256_of_dir(dir: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+/// Read the SHA-256 of a cached raw archive file.
+fn sha256_of_cached_archive(
+    dir: &std::path::Path,
+    asset_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     use sha2::{Digest as _, Sha256 as Sha};
-    let mut hasher = Sha::new();
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        hasher.update(std::fs::read(entry.path())?);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    let data = std::fs::read(dir.join(asset_name))?;
+    Ok(format!("{:x}", Sha::digest(&data)))
+}
+
+/// Write raw download bytes into the cache directory.
+fn write_raw_to_cache(
+    cache_dir: &std::path::Path,
+    asset_name: &str,
+    data: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(cache_dir)?;
+    std::fs::write(cache_dir.join(asset_name), data)?;
+    Ok(())
 }
 
 /// Sync downloadable items (artifacts, tools, or apps).
@@ -1708,10 +1712,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                let actual_sha = if cache_dir_has_content(&cache_dir) {
+                let actual_sha = if cache_has_raw_archive(&cache_dir, &chosen.asset_name) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
-                    sha256_of_dir(&cache_dir).unwrap_or_default()
+                    sha256_of_cached_archive(&cache_dir, &chosen.asset_name).unwrap_or_default()
                 } else {
                     let type_label = match resolved.provider_type {
                         ProviderType::Gitea => "Gitea",
@@ -1739,8 +1743,8 @@ fn sync_downloadables(
                             .into());
                         }
 
-                    pb.set_message("extracting...");
-                    un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                    pb.set_message("caching...");
+                    write_raw_to_cache(&cache_dir, &chosen.asset_name, &data)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message(format!("v{} ✓", chosen.version));
                     sha
@@ -1757,6 +1761,7 @@ fn sync_downloadables(
                         version: chosen.version,
                         url: chosen.url,
                         sha256: actual_sha,
+                        asset_name: chosen.asset_name,
                     },
                 );
             }
@@ -1786,10 +1791,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                let actual_sha = if cache_dir_has_content(&cache_dir) {
+                let actual_sha = if cache_has_raw_archive(&cache_dir, &chosen.asset_name) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
-                    sha256_of_dir(&cache_dir).unwrap_or_default()
+                    sha256_of_cached_archive(&cache_dir, &chosen.asset_name).unwrap_or_default()
                 } else {
                     pb.set_message(format!("downloading v{} (GitLab: {})...", chosen.version, project));
                     pb.set_style(download_style.clone());
@@ -1808,8 +1813,8 @@ fn sync_downloadables(
                             .into());
                         }
 
-                    pb.set_message("extracting...");
-                    un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                    pb.set_message("caching...");
+                    write_raw_to_cache(&cache_dir, &chosen.asset_name, &data)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message(format!("v{} ✓", chosen.version));
                     sha
@@ -1822,6 +1827,7 @@ fn sync_downloadables(
                         version: chosen.version,
                         url: chosen.url,
                         sha256: actual_sha,
+                        asset_name: chosen.asset_name,
                     },
                 );
             }
@@ -1851,10 +1857,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                let actual_sha = if cache_dir_has_content(&cache_dir) {
+                let actual_sha = if cache_has_raw_archive(&cache_dir, &chosen.asset_name) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
-                    sha256_of_dir(&cache_dir).unwrap_or_default()
+                    sha256_of_cached_archive(&cache_dir, &chosen.asset_name).unwrap_or_default()
                 } else {
                     pb.set_message(format!("downloading v{} (Artifactory: {})...", chosen.version, path));
                     pb.set_style(download_style.clone());
@@ -1873,8 +1879,8 @@ fn sync_downloadables(
                             .into());
                         }
 
-                    pb.set_message("extracting...");
-                    un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
+                    pb.set_message("caching...");
+                    write_raw_to_cache(&cache_dir, &chosen.asset_name, &data)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message(format!("v{} ✓", chosen.version));
                     sha
@@ -1887,6 +1893,7 @@ fn sync_downloadables(
                         version: chosen.version,
                         url: chosen.url,
                         sha256: actual_sha,
+                        asset_name: chosen.asset_name,
                     },
                 );
             }
@@ -1899,10 +1906,16 @@ fn sync_downloadables(
                 pb.set_prefix(name.to_string());
                 pb.enable_steady_tick(std::time::Duration::from_millis(80));
 
-                let actual_sha = if cache_dir_has_content(&cache_dir) {
+                // Infer filename from URL
+                let filename = url
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("download");
+
+                let actual_sha = if cache_has_raw_archive(&cache_dir, filename) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message("(cached)".to_string());
-                    sha256_of_dir(&cache_dir).unwrap_or_default()
+                    sha256_of_cached_archive(&cache_dir, filename).unwrap_or_default()
                 } else {
                     pb.set_message(format!("downloading {}...", url));
                     pb.set_style(download_style.clone());
@@ -1919,13 +1932,8 @@ fn sync_downloadables(
                             .into());
                         }
 
-                    // Infer filename from URL
-                    let filename = url
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("download");
-                    pb.set_message("extracting...");
-                    un_download::extract_archive(&data, filename, &cache_dir)?;
+                    pb.set_message("caching...");
+                    write_raw_to_cache(&cache_dir, filename, &data)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message("✓".to_string());
                     sha
@@ -1938,6 +1946,7 @@ fn sync_downloadables(
                         version: "latest".to_string(),
                         url: url.clone(),
                         sha256: actual_sha,
+                        asset_name: filename.to_string(),
                     },
                 );
             }
@@ -1947,50 +1956,60 @@ fn sync_downloadables(
     Ok(locked)
 }
 
-/// Link or copy an artifact from cache to workspace path.
-fn link_or_copy_artifact(
+/// Place an artifact from the raw cache into the workspace.
+///
+/// When `extract` is true (default), the cached archive is extracted into `workspace_path`.
+/// When `extract` is false, the raw archive file is copied/symlinked as-is.
+fn place_artifact(
     cache_dir: &std::path::Path,
+    asset_name: &str,
     workspace_path: &std::path::Path,
+    extract: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Check for dangling symlink (target deleted but symlink remains)
-    #[cfg(unix)]
-    {
-        if let Ok(meta) = std::fs::symlink_metadata(workspace_path) {
-            if meta.file_type().is_symlink() {
-                if !workspace_path.exists() {
-                    // Dangling symlink — remove and re-link
+    // Skip if already placed
+    if workspace_path.exists() {
+        #[cfg(unix)]
+        {
+            // Check for dangling symlink
+            if let Ok(meta) = std::fs::symlink_metadata(workspace_path) {
+                if meta.file_type().is_symlink() && !workspace_path.exists() {
                     std::fs::remove_file(workspace_path)?;
                 } else {
-                    // Valid symlink — already placed
                     return Ok(());
                 }
-            } else if workspace_path.exists() {
-                // Real file/directory — already placed
-                return Ok(());
             }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        if workspace_path.exists() {
-            return Ok(()); // Already placed
-        }
+        #[cfg(not(unix))]
+        return Ok(());
     }
 
     if let Some(parent) = workspace_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // If cache_dir is a directory with exactly one entry, link that entry.
-    // Otherwise, create a symlink to the cache directory itself.
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(cache_dir, workspace_path)?;
+    let raw_file = cache_dir.join(asset_name);
+    if !raw_file.exists() {
+        return Err(format!(
+            "cached archive not found: {}",
+            raw_file.display()
+        )
+        .into());
     }
-    #[cfg(not(unix))]
-    {
-        // On Windows, copy instead of symlink  
-        copy_dir_recursive(cache_dir, workspace_path)?;
+
+    if extract {
+        // Extract the archive into the workspace path
+        let data = std::fs::read(&raw_file)?;
+        un_download::extract_archive(&data, asset_name, workspace_path)?;
+    } else {
+        // Copy the raw file as-is
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&raw_file, workspace_path)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::copy(&raw_file, workspace_path)?;
+        }
     }
 
     Ok(())
@@ -2063,22 +2082,29 @@ fn ensure_tool_downloaded(
                     })?;
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
-            if !cache_dir_has_content(&cache_dir) {
-                let pb = oneoff_download_bar(name);
-                pb.set_message(format!("downloading v{}...", chosen.version));
-                let data = match resolved.provider_type {
-                    ProviderType::Gitea => GiteaProvider::download_asset(
-                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
-                    )?,
-                    _ => GitHubProvider::download_asset(
-                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
-                    )?,
+            let extract_dir = cache_dir.join("content");
+            if !extract_dir.is_dir() {
+                // Download (or read from raw cache) and extract
+                let data = if cache_has_raw_archive(&cache_dir, &chosen.asset_name) {
+                    std::fs::read(cache_dir.join(&chosen.asset_name))?
+                } else {
+                    let pb = oneoff_download_bar(name);
+                    pb.set_message(format!("downloading v{}...", chosen.version));
+                    let data = match resolved.provider_type {
+                        ProviderType::Gitea => GiteaProvider::download_asset(
+                            engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
+                        )?,
+                        _ => GitHubProvider::download_asset(
+                            engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
+                        )?,
+                    };
+                    write_raw_to_cache(&cache_dir, &chosen.asset_name, &data)?;
+                    pb.finish_with_message(format!("v{} ✓", chosen.version));
+                    data
                 };
-                pb.set_message("extracting...");
-                un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
-                pb.finish_with_message(format!("v{} ✓", chosen.version));
+                un_download::extract_archive(&data, &chosen.asset_name, &extract_dir)?;
             }
-            Ok((cache_dir, chosen.version))
+            Ok((extract_dir, chosen.version))
         }
         DownloadSource::GitLab { project } => {
             let version_req_str = tool.version.as_deref().unwrap_or("*");
@@ -2096,17 +2122,23 @@ fn ensure_tool_downloaded(
                     })?;
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
-            if !cache_dir_has_content(&cache_dir) {
-                let pb = oneoff_download_bar(name);
-                pb.set_message(format!("downloading v{}...", chosen.version));
-                let data = GitLabProvider::download_asset(
-                    engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
-                )?;
-                pb.set_message("extracting...");
-                un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
-                pb.finish_with_message(format!("v{} ✓", chosen.version));
+            let extract_dir = cache_dir.join("content");
+            if !extract_dir.is_dir() {
+                let data = if cache_has_raw_archive(&cache_dir, &chosen.asset_name) {
+                    std::fs::read(cache_dir.join(&chosen.asset_name))?
+                } else {
+                    let pb = oneoff_download_bar(name);
+                    pb.set_message(format!("downloading v{}...", chosen.version));
+                    let data = GitLabProvider::download_asset(
+                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
+                    )?;
+                    write_raw_to_cache(&cache_dir, &chosen.asset_name, &data)?;
+                    pb.finish_with_message(format!("v{} ✓", chosen.version));
+                    data
+                };
+                un_download::extract_archive(&data, &chosen.asset_name, &extract_dir)?;
             }
-            Ok((cache_dir, chosen.version))
+            Ok((extract_dir, chosen.version))
         }
         DownloadSource::Artifactory { path } => {
             let version_req_str = tool.version.as_deref().unwrap_or("*");
@@ -2124,30 +2156,42 @@ fn ensure_tool_downloaded(
                     })?;
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
-            if !cache_dir_has_content(&cache_dir) {
-                let pb = oneoff_download_bar(name);
-                pb.set_message(format!("downloading v{}...", chosen.version));
-                let data = ArtifactoryProvider::download_asset(
-                    engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
-                )?;
-                pb.set_message("extracting...");
-                un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
-                pb.finish_with_message(format!("v{} ✓", chosen.version));
+            let extract_dir = cache_dir.join("content");
+            if !extract_dir.is_dir() {
+                let data = if cache_has_raw_archive(&cache_dir, &chosen.asset_name) {
+                    std::fs::read(cache_dir.join(&chosen.asset_name))?
+                } else {
+                    let pb = oneoff_download_bar(name);
+                    pb.set_message(format!("downloading v{}...", chosen.version));
+                    let data = ArtifactoryProvider::download_asset(
+                        engine.client(), &chosen.url, resolved.token.as_deref(), Some(&pb),
+                    )?;
+                    write_raw_to_cache(&cache_dir, &chosen.asset_name, &data)?;
+                    pb.finish_with_message(format!("v{} ✓", chosen.version));
+                    data
+                };
+                un_download::extract_archive(&data, &chosen.asset_name, &extract_dir)?;
             }
-            Ok((cache_dir, chosen.version))
+            Ok((extract_dir, chosen.version))
         }
         DownloadSource::Url { url } => {
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, "latest");
-            if !cache_dir_has_content(&cache_dir) {
-                let pb = oneoff_download_bar(name);
-                pb.set_message("downloading...");
-                let data = HttpProvider::download_with_progress(&engine, &url, None, &pb)?;
-                let filename = url.rsplit('/').next().unwrap_or("download");
-                pb.set_message("extracting...");
-                un_download::extract_archive(&data, filename, &cache_dir)?;
-                pb.finish_with_message("✓");
+            let filename = url.rsplit('/').next().unwrap_or("download");
+            let extract_dir = cache_dir.join("content");
+            if !extract_dir.is_dir() {
+                let data = if cache_has_raw_archive(&cache_dir, filename) {
+                    std::fs::read(cache_dir.join(filename))?
+                } else {
+                    let pb = oneoff_download_bar(name);
+                    pb.set_message("downloading...");
+                    let data = HttpProvider::download_with_progress(&engine, &url, None, &pb)?;
+                    write_raw_to_cache(&cache_dir, filename, &data)?;
+                    pb.finish_with_message("✓");
+                    data
+                };
+                un_download::extract_archive(&data, filename, &extract_dir)?;
             }
-            Ok((cache_dir, "latest".to_string()))
+            Ok((extract_dir, "latest".to_string()))
         }
     }
 }
