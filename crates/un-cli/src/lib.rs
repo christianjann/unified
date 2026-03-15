@@ -3,6 +3,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tui_banner::{Banner, Style};
 use un_cache::Cache;
 use un_core::{Config, GitReference, LockFile, LockedRepo, Settings, UserConfig};
 use un_git::{CheckoutMode, GitCheckout, GitDatabase, GitRemote};
@@ -10,9 +11,22 @@ use un_git::{CheckoutMode, GitCheckout, GitDatabase, GitRemote};
 #[derive(Parser)]
 #[command(name = "un")]
 #[command(about = "Unified Repo & Artifact Manager")]
+#[command(version = version_string())]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+fn version_string() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let hash = option_env!("UN_COMMIT_SHORT_HASH");
+        match hash {
+            Some(hash) => format!("{version} ({hash})"),
+            None => version.to_string(),
+        }
+    })
 }
 
 #[derive(Subcommand)]
@@ -83,6 +97,10 @@ pub enum Commands {
     /// Manage collections
     #[command(subcommand)]
     Collection(CollectionCommand),
+    /// Print version information
+    Version,
+    /// Print project information (author, license, commit)
+    About,
 }
 
 #[derive(Subcommand)]
@@ -229,8 +247,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => cmd_add(url, name, path, branch, tag, rev)?,
         Commands::Remove { name } => cmd_remove(name)?,
         Commands::Collection(sub) => cmd_collection(sub)?,
+        Commands::Version => cmd_version(),
+        Commands::About => cmd_about(),
     }
     Ok(())
+}
+
+fn cmd_version() {
+    println!("un {}", version_string());
+}
+
+fn cmd_about() {
+    if let Ok(banner) = Banner::new("un - Unified Repo")
+        .map(|b| b.style(Style::NeonCyber).render())
+    {
+        println!("{banner}");
+    }
+    println!("Version:  {}", env!("CARGO_PKG_VERSION"));
+    if let Some(hash) = option_env!("UN_COMMIT_HASH") {
+        println!("Commit:   {}", hash);
+    }
+    if let Some(date) = option_env!("UN_COMMIT_DATE") {
+        println!("Date:     {}", date);
+    }
+    println!("Author:   {}", env!("CARGO_PKG_AUTHORS"));
+    println!("License:  {}", env!("CARGO_PKG_LICENSE"));
+    println!("Homepage: {}", env!("CARGO_PKG_HOMEPAGE"));
 }
 
 fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
