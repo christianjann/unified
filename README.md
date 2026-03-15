@@ -33,15 +33,16 @@ Modern software projects span multiple repositories, binary artifacts, and exter
 - **Corporate-friendly** — `git-fetch-with-cli` option for proxy/SSH/credential helper configs
 
 ## Installation
+> **Caution:** This tool is pre-alpha, and many features are not yet implemented or tested. `cargo install` is not available yet.
 
 ```bash
 # From source (requires Rust 1.85+)
-cargo install unifiedrepo
+cargo install un-cli
 
 # Or build from this repo
 git clone https://github.com/christianjann/unified.git
 cd unified
-cargo install --path .
+cargo install --path crates/un-cli
 ```
 
 This gives you the `un` command.
