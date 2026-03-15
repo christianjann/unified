@@ -111,6 +111,21 @@ impl GitDatabase {
         &self.path
     }
 
+    /// Prune stale worktree registrations (e.g., after a directory was manually deleted).
+    pub fn prune_worktrees(&self) -> Result<()> {
+        let status = std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to run `git worktree prune`")?;
+        if !status.success() {
+            anyhow::bail!("git worktree prune failed in {}", self.path.display());
+        }
+        Ok(())
+    }
+
     pub fn fetch(
         &self,
         remote: &GitRemote,
@@ -295,6 +310,8 @@ impl GitCheckout {
     ) -> Result<Self> {
         match mode {
             CheckoutMode::Worktree => {
+                // Prune stale worktree registrations before adding
+                database.prune_worktrees()?;
                 std::fs::create_dir_all(workspace_path.parent().unwrap_or(workspace_path))?;
                 let status = std::process::Command::new("git")
                     .args(["worktree", "add", &workspace_path.to_string_lossy(), oid])
@@ -350,6 +367,8 @@ impl GitCheckout {
         includes: Vec<String>,
         excludes: Vec<String>,
     ) -> Result<()> {
+        // Prune stale worktree registrations before adding
+        database.prune_worktrees()?;
         std::fs::create_dir_all(workspace_path.parent().unwrap_or(workspace_path))?;
         let status = std::process::Command::new("git")
             .args([

@@ -450,12 +450,67 @@ fn cmd_sync(
     let max_parallel = settings.parallel.unwrap_or(4);
 
     // Collect work items
-    let repos: Vec<(String, un_core::Repo)> = active_repos.into_iter().collect();
+    let mut repos: Vec<(String, un_core::Repo)> = active_repos.into_iter().collect();
 
     if repos.is_empty() {
         println!("No repos to sync.");
         return Ok(());
     }
+
+    // Pre-check: detect repos with local modifications that would need re-checkout.
+    // This runs before the parallel sync so we can prompt the user interactively.
+    let mut skip_repos = std::collections::HashSet::new();
+    for (name, repo) in &repos {
+        let workspace_path = std::env::current_dir()?.join(&repo.path);
+        // Only needs attention when directory exists but ok marker is missing
+        // (i.e., sync would attempt a fresh checkout over existing content)
+        if workspace_path.exists() && !un_git::has_ok_marker(&workspace_path) {
+            let git_dir = workspace_path.join(".git");
+            let is_dirty = if git_dir.exists() {
+                // It's a git repo/worktree — check for uncommitted changes
+                un_git::repo_status(&workspace_path)
+                    .map(|s| s.is_dirty)
+                    .unwrap_or(false)
+            } else {
+                // Copy-mode or manual directory — treat non-empty as "modified"
+                std::fs::read_dir(&workspace_path)
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false)
+            };
+            if is_dirty {
+                eprintln!(
+                    "warning: '{}' at {} has local modifications but no checkout marker",
+                    name, repo.path
+                );
+                eprint!("  (r)eset and re-sync, (s)kip, (a)bort? ");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                match input.trim().to_lowercase().as_str() {
+                    "r" | "reset" => {
+                        // Remove the existing directory so sync can recreate it
+                        let git_file = workspace_path.join(".git");
+                        if git_file.exists() && git_file.is_file() {
+                            // It's a worktree — remove via git first
+                            let _ = std::process::Command::new("git")
+                                .args(["worktree", "remove", "--force", &workspace_path.to_string_lossy()])
+                                .status();
+                        }
+                        if workspace_path.exists() {
+                            std::fs::remove_dir_all(&workspace_path)?;
+                        }
+                    }
+                    "a" | "abort" => {
+                        return Err("Aborted by user".into());
+                    }
+                    _ => {
+                        // Default: skip
+                        skip_repos.insert(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    repos.retain(|(name, _)| !skip_repos.contains(name));
 
     // Set up progress display
     let multi = MultiProgress::new();
@@ -669,6 +724,50 @@ fn cmd_sync(
             link_or_copy_artifact(&cache_dir, &workspace_path)?;
         }
     }
+
+    // --locked: verify artifact integrity against lock file
+    if locked
+        && let Some(ref lock) = existing_lock {
+            let mut integrity_errors = Vec::new();
+            for (name, new_locked) in &locked_artifacts {
+                if let Some(old_locked) = lock.artifacts.get(name)
+                    && !old_locked.sha256.is_empty()
+                        && !new_locked.sha256.is_empty()
+                        && old_locked.sha256 != new_locked.sha256
+                    {
+                        integrity_errors.push(format!(
+                            "artifact '{}': sha256 mismatch (lock: {}..., actual: {}...)",
+                            name,
+                            &old_locked.sha256[..12.min(old_locked.sha256.len())],
+                            &new_locked.sha256[..12.min(new_locked.sha256.len())],
+                        ));
+                    }
+            }
+            for (name, new_locked) in &locked_tools {
+                if let Some(old_locked) = lock.tools.get(name)
+                    && !old_locked.sha256.is_empty()
+                        && !new_locked.sha256.is_empty()
+                        && old_locked.sha256 != new_locked.sha256
+                    {
+                        integrity_errors.push(format!(
+                            "tool '{}': sha256 mismatch (lock: {}..., actual: {}...)",
+                            name,
+                            &old_locked.sha256[..12.min(old_locked.sha256.len())],
+                            &new_locked.sha256[..12.min(new_locked.sha256.len())],
+                        ));
+                    }
+            }
+            if !integrity_errors.is_empty() {
+                eprintln!("\nIntegrity errors:");
+                for e in &integrity_errors {
+                    eprintln!("  {}", e);
+                }
+                return Err(format!(
+                    "{} artifact(s)/tool(s) failed integrity check. Run `un sync` to re-download.",
+                    integrity_errors.len()
+                ).into());
+            }
+        }
 
     // Write lock file with config hash
     // When syncing a collection, merge new results into existing lock (don't drop unsynced repos)
@@ -1512,6 +1611,31 @@ type DownloadSpec<'a> = (
     Option<&'a str>,
 );
 
+/// Check if a cache directory exists and contains at least one file.
+/// Prevents treating empty directories (from failed downloads) as cached.
+fn cache_dir_has_content(dir: &std::path::Path) -> bool {
+    dir.is_dir()
+        && std::fs::read_dir(dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+}
+
+/// Compute a combined SHA-256 over all files in a directory (sorted by name).
+/// Used to verify cache integrity for artifacts/tools/apps.
+fn sha256_of_dir(dir: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    use sha2::{Digest as _, Sha256 as Sha};
+    let mut hasher = Sha::new();
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        hasher.update(std::fs::read(entry.path())?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Sync downloadable items (artifacts, tools, or apps).
 /// Returns a map of locked entries for the successfully downloaded items.
 fn sync_downloadables(
@@ -1584,10 +1708,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                let actual_sha = if cache_dir.exists() {
+                let actual_sha = if cache_dir_has_content(&cache_dir) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
-                    expected_sha256.unwrap_or("").to_string()
+                    sha256_of_dir(&cache_dir).unwrap_or_default()
                 } else {
                     let type_label = match resolved.provider_type {
                         ProviderType::Gitea => "Gitea",
@@ -1662,10 +1786,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                let actual_sha = if cache_dir.exists() {
+                let actual_sha = if cache_dir_has_content(&cache_dir) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
-                    expected_sha256.unwrap_or("").to_string()
+                    sha256_of_dir(&cache_dir).unwrap_or_default()
                 } else {
                     pb.set_message(format!("downloading v{} (GitLab: {})...", chosen.version, project));
                     pb.set_style(download_style.clone());
@@ -1727,10 +1851,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                let actual_sha = if cache_dir.exists() {
+                let actual_sha = if cache_dir_has_content(&cache_dir) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
-                    expected_sha256.unwrap_or("").to_string()
+                    sha256_of_dir(&cache_dir).unwrap_or_default()
                 } else {
                     pb.set_message(format!("downloading v{} (Artifactory: {})...", chosen.version, path));
                     pb.set_style(download_style.clone());
@@ -1775,10 +1899,10 @@ fn sync_downloadables(
                 pb.set_prefix(name.to_string());
                 pb.enable_steady_tick(std::time::Duration::from_millis(80));
 
-                let actual_sha = if cache_dir.exists() {
+                let actual_sha = if cache_dir_has_content(&cache_dir) {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message("(cached)".to_string());
-                    expected_sha256.unwrap_or("").to_string()
+                    sha256_of_dir(&cache_dir).unwrap_or_default()
                 } else {
                     pb.set_message(format!("downloading {}...", url));
                     pb.set_style(download_style.clone());
@@ -1828,8 +1952,29 @@ fn link_or_copy_artifact(
     cache_dir: &std::path::Path,
     workspace_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if workspace_path.exists() {
-        return Ok(()); // Already placed
+    // Check for dangling symlink (target deleted but symlink remains)
+    #[cfg(unix)]
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(workspace_path) {
+            if meta.file_type().is_symlink() {
+                if !workspace_path.exists() {
+                    // Dangling symlink — remove and re-link
+                    std::fs::remove_file(workspace_path)?;
+                } else {
+                    // Valid symlink — already placed
+                    return Ok(());
+                }
+            } else if workspace_path.exists() {
+                // Real file/directory — already placed
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if workspace_path.exists() {
+            return Ok(()); // Already placed
+        }
     }
 
     if let Some(parent) = workspace_path.parent() {
@@ -1918,7 +2063,7 @@ fn ensure_tool_downloaded(
                     })?;
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
-            if !cache_dir.exists() {
+            if !cache_dir_has_content(&cache_dir) {
                 let pb = oneoff_download_bar(name);
                 pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = match resolved.provider_type {
@@ -1951,7 +2096,7 @@ fn ensure_tool_downloaded(
                     })?;
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
-            if !cache_dir.exists() {
+            if !cache_dir_has_content(&cache_dir) {
                 let pb = oneoff_download_bar(name);
                 pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = GitLabProvider::download_asset(
@@ -1979,7 +2124,7 @@ fn ensure_tool_downloaded(
                     })?;
 
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, &chosen.version);
-            if !cache_dir.exists() {
+            if !cache_dir_has_content(&cache_dir) {
                 let pb = oneoff_download_bar(name);
                 pb.set_message(format!("downloading v{}...", chosen.version));
                 let data = ArtifactoryProvider::download_asset(
@@ -1993,7 +2138,7 @@ fn ensure_tool_downloaded(
         }
         DownloadSource::Url { url } => {
             let cache_dir = DownloadEngine::cache_path(cache, "tools", name, "latest");
-            if !cache_dir.exists() {
+            if !cache_dir_has_content(&cache_dir) {
                 let pb = oneoff_download_bar(name);
                 pb.set_message("downloading...");
                 let data = HttpProvider::download_with_progress(&engine, &url, None, &pb)?;
