@@ -712,7 +712,8 @@ fn cmd_sync(
     // Auto-update .gitignore if enabled (only paths that were actually synced)
     if settings.manage_gitignore.unwrap_or(true) {
         let synced_repos = config.repos_for_collection(active_collection.as_deref())?;
-        update_gitignore_for_repos(&synced_repos)?;
+        let synced_artifacts = config.artifacts_for_collection(active_collection.as_deref())?;
+        update_gitignore_for_managed(&synced_repos, &synced_artifacts)?;
     }
 
     // Auto-update .vscode/settings.json if enabled
@@ -1264,18 +1265,23 @@ fn cmd_log(repo_name: &str, count: usize) -> Result<(), Box<dyn std::error::Erro
 }
 
 fn update_gitignore(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    update_gitignore_for_repos(&config.repos)
+    update_gitignore_for_managed(
+        &config.repos,
+        &config.artifacts,
+    )
 }
 
-fn update_gitignore_for_repos(
+fn update_gitignore_for_managed(
     repos: &std::collections::HashMap<String, un_core::Repo>,
+    artifacts: &std::collections::HashMap<String, un_core::Artifact>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let gitignore_path = ".gitignore";
     let managed_block_start = "# BEGIN UNIFIED MANAGED BLOCK - DO NOT EDIT\n";
     let managed_block_end = "# END UNIFIED MANAGED BLOCK\n";
 
-    // Collect paths to ignore (include .unified/ for user config)
+    // Collect paths to ignore (repos + artifacts + .unified/)
     let mut ignore_paths: Vec<&str> = repos.values().map(|r| r.path.as_str()).collect();
+    ignore_paths.extend(artifacts.values().map(|a| a.path.as_str()));
     ignore_paths.sort();
     // Always ignore the .unified/ directory
     if !ignore_paths.contains(&".unified/") {
@@ -1578,9 +1584,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                if cache_dir.exists() {
+                let actual_sha = if cache_dir.exists() {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
+                    expected_sha256.unwrap_or("").to_string()
                 } else {
                     let type_label = match resolved.provider_type {
                         ProviderType::Gitea => "Gitea",
@@ -1612,9 +1619,9 @@ fn sync_downloadables(
                     un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message(format!("v{} ✓", chosen.version));
-                }
+                    sha
+                };
 
-                let sha = expected_sha256.unwrap_or("").to_string();
                 let source_label = match resolved.provider_type {
                     ProviderType::Gitea => format!("gitea:{}", owner_repo),
                     _ => format!("github:{}", owner_repo),
@@ -1625,7 +1632,7 @@ fn sync_downloadables(
                         source: source_label,
                         version: chosen.version,
                         url: chosen.url,
-                        sha256: sha,
+                        sha256: actual_sha,
                     },
                 );
             }
@@ -1655,9 +1662,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                if cache_dir.exists() {
+                let actual_sha = if cache_dir.exists() {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
+                    expected_sha256.unwrap_or("").to_string()
                 } else {
                     pb.set_message(format!("downloading v{} (GitLab: {})...", chosen.version, project));
                     pb.set_style(download_style.clone());
@@ -1680,16 +1688,16 @@ fn sync_downloadables(
                     un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message(format!("v{} ✓", chosen.version));
-                }
+                    sha
+                };
 
-                let sha = expected_sha256.unwrap_or("").to_string();
                 locked.insert(
                     name.to_string(),
                     LockedArtifact {
                         source: format!("gitlab:{}", project),
                         version: chosen.version,
                         url: chosen.url,
-                        sha256: sha,
+                        sha256: actual_sha,
                     },
                 );
             }
@@ -1719,9 +1727,10 @@ fn sync_downloadables(
                 let cache_dir =
                     DownloadEngine::cache_path(cache, category, name, &chosen.version);
 
-                if cache_dir.exists() {
+                let actual_sha = if cache_dir.exists() {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message(format!("v{} (cached)", chosen.version));
+                    expected_sha256.unwrap_or("").to_string()
                 } else {
                     pb.set_message(format!("downloading v{} (Artifactory: {})...", chosen.version, path));
                     pb.set_style(download_style.clone());
@@ -1744,16 +1753,16 @@ fn sync_downloadables(
                     un_download::extract_archive(&data, &chosen.asset_name, &cache_dir)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message(format!("v{} ✓", chosen.version));
-                }
+                    sha
+                };
 
-                let sha = expected_sha256.unwrap_or("").to_string();
                 locked.insert(
                     name.to_string(),
                     LockedArtifact {
                         source: format!("artifactory:{}", path),
                         version: chosen.version,
                         url: chosen.url,
-                        sha256: sha,
+                        sha256: actual_sha,
                     },
                 );
             }
@@ -1766,13 +1775,25 @@ fn sync_downloadables(
                 pb.set_prefix(name.to_string());
                 pb.enable_steady_tick(std::time::Duration::from_millis(80));
 
-                if cache_dir.exists() {
+                let actual_sha = if cache_dir.exists() {
                     pb.set_style(cached_style.clone());
                     pb.finish_with_message("(cached)".to_string());
+                    expected_sha256.unwrap_or("").to_string()
                 } else {
                     pb.set_message(format!("downloading {}...", url));
                     pb.set_style(download_style.clone());
                     let data = HttpProvider::download_with_progress(engine, url, expected_sha256, &pb)?;
+                    let sha = DownloadEngine::sha256(&data);
+
+                    if let Some(expected) = expected_sha256
+                        && sha != expected {
+                            pb.finish_with_message("✗ SHA-256 mismatch".to_string());
+                            return Err(format!(
+                                "SHA-256 mismatch for {}: expected {}, got {}",
+                                name, expected, sha
+                            )
+                            .into());
+                        }
 
                     // Infer filename from URL
                     let filename = url
@@ -1783,16 +1804,16 @@ fn sync_downloadables(
                     un_download::extract_archive(&data, filename, &cache_dir)?;
                     pb.set_style(done_style.clone());
                     pb.finish_with_message("✓".to_string());
-                }
+                    sha
+                };
 
-                let sha = expected_sha256.unwrap_or("").to_string();
                 locked.insert(
                     name.to_string(),
                     LockedArtifact {
                         source: format!("url:{}", url),
                         version: "latest".to_string(),
                         url: url.clone(),
-                        sha256: sha,
+                        sha256: actual_sha,
                     },
                 );
             }

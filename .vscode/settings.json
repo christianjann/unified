@@ -1,5 +1,6 @@
 {
   "git.ignoredRepositories": [
-    "crates/un-cli/tests/repos/test-repo"
+    "crates/un-cli/tests/repos/test-repo",
+    "tests/repos/hello-world"
   ]
 }

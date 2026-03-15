@@ -13,3 +13,15 @@ test-repo = { # this is allowed in toml 1.1 https://github.com/toml-lang/toml/re
     url = "file://./crates/un-cli/tests/test_data/source", 
     path = "crates/un-cli/tests/repos/test-repo" 
 }
+
+hello-world = {
+    url = "https://github.com/octocat/Hello-World.git",
+    path = "tests/repos/hello-world",
+    branch = "master"
+}
+
+[artifacts]
+jq = {
+    url = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64",
+    path = "tests/downloads/jq"
+}

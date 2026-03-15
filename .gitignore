@@ -5,4 +5,6 @@ unified.lock
 # BEGIN UNIFIED MANAGED BLOCK - DO NOT EDIT
 .unified/
 crates/un-cli/tests/repos/test-repo
+tests/downloads/jq
+tests/repos/hello-world
 # END UNIFIED MANAGED BLOCK
