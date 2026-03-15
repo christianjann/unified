@@ -107,20 +107,20 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 
 **Goal:** Developers can sync a named subset of the workspace. Useful when not everyone needs — or has permission to clone — every repo.
 
-- [ ] `[collections.<name>]` config schema — `repos`, `artifacts`, `tools` arrays referencing names
-- [ ] Validation — error if a collection references a name not defined in `[repos.*]`/`[artifacts.*]`/`[tools.*]`
-- [ ] Resolver filters operations to active collection before executing
-- [ ] `un sync --collection <name>` — sync only the named collection
-- [ ] `un sync --all` — sync everything, ignoring active collection
-- [ ] `.unified/user.toml` — user-local config file (git-ignored), stores `default-collection`
-- [ ] `un collection use <name>` — write `default-collection` to `.unified/user.toml`
-- [ ] `un collection use --clear` — remove `default-collection`
-- [ ] `un collection list` — list collections with member counts
-- [ ] `un collection show <name>` — list repos/artifacts/tools in the collection
-- [ ] `UN_COLLECTION` env var override
-- [ ] `un status`, `un diff`, `un exec`, `un update` respect active collection; `--all` overrides
-- [ ] `.gitignore` and `.vscode/settings.json` only list paths for the active collection's repos
-- [ ] Unit tests: collection resolution, validation, user.toml round-trip
+- [X] `[collections.<name>]` config schema — `repos`, `artifacts`, `tools` arrays referencing names
+- [X] Validation — error if a collection references a name not defined in `[repos.*]`/`[artifacts.*]`/`[tools.*]`
+- [X] Resolver filters operations to active collection before executing
+- [X] `un sync --collection <name>` — sync only the named collection
+- [X] `un sync --all` — sync everything, ignoring active collection
+- [X] `.unified/user.toml` — user-local config file (git-ignored), stores `default-collection`
+- [X] `un collection use <name>` — write `default-collection` to `.unified/user.toml`
+- [X] `un collection use --clear` — remove `default-collection`
+- [X] `un collection list` — list collections with member counts
+- [X] `un collection show <name>` — list repos/artifacts/tools in the collection
+- [X] `UN_COLLECTION` env var override
+- [X] `un status`, `un diff`, `un exec`, `un update` respect active collection; `--all` overrides
+- [X] `.gitignore` and `.vscode/settings.json` only list paths for the active collection's repos
+- [X] Unit tests: collection resolution, validation, user.toml round-trip
 
 ### Phase 4: Git workflow commands
 

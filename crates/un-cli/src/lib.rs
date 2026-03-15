@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use un_cache::Cache;
-use un_core::{Config, GitReference, LockFile, LockedRepo, Settings};
+use un_core::{Config, GitReference, LockFile, LockedRepo, Settings, UserConfig};
 use un_git::{CheckoutMode, GitCheckout, GitDatabase, GitRemote};
 
 #[derive(Parser)]
@@ -30,11 +30,31 @@ pub enum Commands {
         /// Use shallow clones (depth 1) for all repos
         #[arg(long)]
         shallow: bool,
+        /// Sync only the named collection
+        #[arg(long)]
+        collection: Option<String>,
+        /// Sync everything, ignoring active collection
+        #[arg(long)]
+        all: bool,
     },
     /// Fetch latest for branch-tracking repos and update lock file
-    Update,
+    Update {
+        /// Update only the named collection
+        #[arg(long)]
+        collection: Option<String>,
+        /// Update everything, ignoring active collection
+        #[arg(long)]
+        all: bool,
+    },
     /// Show workspace status
-    Status,
+    Status {
+        /// Show status only for the named collection
+        #[arg(long)]
+        collection: Option<String>,
+        /// Show status for all repos, ignoring active collection
+        #[arg(long)]
+        all: bool,
+    },
     /// Add a repository to the config
     Add {
         /// Git URL of the repository
@@ -58,6 +78,28 @@ pub enum Commands {
     /// Remove a repository from the config
     Remove {
         /// Name of the repo to remove
+        name: String,
+    },
+    /// Manage collections
+    #[command(subcommand)]
+    Collection(CollectionCommand),
+}
+
+#[derive(Subcommand)]
+pub enum CollectionCommand {
+    /// Set the default collection
+    Use {
+        /// Collection name to set as default (omit with --clear to remove)
+        name: Option<String>,
+        /// Remove the default collection
+        #[arg(long)]
+        clear: bool,
+    },
+    /// List all collections with member counts
+    List,
+    /// Show repos/artifacts/tools in a collection
+    Show {
+        /// Name of the collection
         name: String,
     },
 }
@@ -137,6 +179,28 @@ fn resolve_reference(repo: &un_core::Repo) -> GitReference {
     }
 }
 
+/// Resolve the active collection from CLI flag → env var → user.toml → None.
+/// Returns None if `--all` is set.
+fn resolve_active_collection(
+    cli_collection: Option<&str>,
+    cli_all: bool,
+) -> Option<String> {
+    if cli_all {
+        return None;
+    }
+    if let Some(name) = cli_collection {
+        return Some(name.to_string());
+    }
+    if let Ok(val) = std::env::var("UN_COLLECTION") {
+        if !val.is_empty() {
+            return Some(val);
+        }
+    }
+    let workspace_root = std::env::current_dir().ok()?;
+    let user_config = UserConfig::load(&workspace_root);
+    user_config.default_collection
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -146,9 +210,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             locked,
             frozen,
             shallow,
-        } => cmd_sync(locked, frozen, shallow)?,
-        Commands::Update => cmd_update()?,
-        Commands::Status => cmd_status()?,
+            collection,
+            all,
+        } => cmd_sync(locked, frozen, shallow, collection.as_deref(), all)?,
+        Commands::Update { collection, all } => {
+            cmd_update(collection.as_deref(), all)?
+        }
+        Commands::Status { collection, all } => {
+            cmd_status(collection.as_deref(), all)?
+        }
         Commands::Add {
             url,
             name,
@@ -158,6 +228,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             rev,
         } => cmd_add(url, name, path, branch, tag, rev)?,
         Commands::Remove { name } => cmd_remove(name)?,
+        Commands::Collection(sub) => cmd_collection(sub)?,
     }
     Ok(())
 }
@@ -171,6 +242,7 @@ fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
         },
         settings: Some(Settings::default()),
         repos: std::collections::HashMap::new(),
+        collections: std::collections::HashMap::new(),
     };
     let toml_str = toml::to_string(&config)?;
     std::fs::write("unified.toml", toml_str)?;
@@ -182,12 +254,29 @@ fn cmd_sync(
     locked: bool,
     frozen: bool,
     cli_shallow: bool,
+    cli_collection: Option<&str>,
+    cli_all: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_content = std::fs::read_to_string("unified.toml")?;
     let config: Config = toml::from_str(&config_content)?;
     let current_hash = config_hash(&config_content);
     let default_settings = Settings::default();
     let settings = config.settings.as_ref().unwrap_or(&default_settings);
+
+    // Validate collections
+    let validation_errors = config.validate_collections();
+    if !validation_errors.is_empty() {
+        for e in &validation_errors {
+            eprintln!("error: {}", e);
+        }
+        return Err(format!("{} collection validation error(s)", validation_errors.len()).into());
+    }
+
+    // Resolve active collection
+    let active_collection = resolve_active_collection(cli_collection, cli_all);
+    if let Some(ref name) = active_collection {
+        println!("Using collection: {}", name);
+    }
 
     // Read existing lock file if present
     let existing_lock: Option<LockFile> = if std::path::Path::new("unified.lock").exists() {
@@ -212,21 +301,24 @@ fn cmd_sync(
         }
     }
 
+    // Filter repos by collection
+    let active_repos = config.repos_for_collection(active_collection.as_deref())?;
+
     // --frozen: no network, resolve entirely from lock + cache
     if frozen {
         let lock = existing_lock
             .as_ref()
             .ok_or("--frozen requires an existing unified.lock file")?;
-        return cmd_sync_frozen(&config, lock, settings);
+        return cmd_sync_frozen(&config, lock, settings, &active_repos);
     }
 
     let max_parallel = settings.parallel.unwrap_or(4);
 
     // Collect work items
-    let repos: Vec<(String, un_core::Repo)> = config.repos.clone().into_iter().collect();
+    let repos: Vec<(String, un_core::Repo)> = active_repos.into_iter().collect();
 
     if repos.is_empty() {
-        println!("No repos configured.");
+        println!("No repos to sync.");
         return Ok(());
     }
 
@@ -303,23 +395,35 @@ fn cmd_sync(
     }
 
     // Write lock file with config hash
+    // When syncing a collection, merge new results into existing lock (don't drop unsynced repos)
+    let mut all_locked_repos = existing_lock
+        .map(|l| l.repos)
+        .unwrap_or_default();
+    all_locked_repos.extend(
+        Arc::try_unwrap(locked_repos)
+            .unwrap()
+            .into_inner()
+            .unwrap(),
+    );
     let lock_file = LockFile {
         version: 1,
         config_hash: Some(current_hash),
-        repos: Arc::try_unwrap(locked_repos).unwrap().into_inner().unwrap(),
+        repos: all_locked_repos,
     };
     let lock_toml = toml::to_string(&lock_file)?;
     std::fs::write("unified.lock", lock_toml)?;
     println!("Updated unified.lock");
 
-    // Auto-update .gitignore if enabled
+    // Auto-update .gitignore if enabled (only paths that were actually synced)
     if settings.manage_gitignore.unwrap_or(true) {
-        update_gitignore(&config)?;
+        let synced_repos = config.repos_for_collection(active_collection.as_deref())?;
+        update_gitignore_for_repos(&synced_repos)?;
     }
 
     // Auto-update .vscode/settings.json if enabled
     if settings.manage_vscode.unwrap_or(true) {
-        update_vscode_settings(&config)?;
+        let synced_repos = config.repos_for_collection(active_collection.as_deref())?;
+        update_vscode_settings_for_repos(&synced_repos)?;
     }
 
     Ok(())
@@ -362,13 +466,14 @@ fn sync_single_repo(
 
 /// Frozen sync — no network, resolve from lock + cache only.
 fn cmd_sync_frozen(
-    config: &Config,
+    _config: &Config,
     lock: &LockFile,
     _settings: &Settings,
+    active_repos: &std::collections::HashMap<String, un_core::Repo>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Cache::new()?;
 
-    for (name, repo) in &config.repos {
+    for (name, repo) in active_repos {
         let locked = lock
             .repos
             .get(name)
@@ -396,12 +501,31 @@ fn cmd_sync_frozen(
     Ok(())
 }
 
-fn cmd_update() -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_update(
+    cli_collection: Option<&str>,
+    cli_all: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_content = std::fs::read_to_string("unified.toml")?;
     let config: Config = toml::from_str(&config_content)?;
     let cache = Cache::new()?;
     let default_settings = Settings::default();
     let settings = config.settings.as_ref().unwrap_or(&default_settings);
+
+    // Validate collections
+    let validation_errors = config.validate_collections();
+    if !validation_errors.is_empty() {
+        for e in &validation_errors {
+            eprintln!("error: {}", e);
+        }
+        return Err(format!("{} collection validation error(s)", validation_errors.len()).into());
+    }
+
+    let active_collection = resolve_active_collection(cli_collection, cli_all);
+    if let Some(ref name) = active_collection {
+        println!("Using collection: {}", name);
+    }
+
+    let active_repos = config.repos_for_collection(active_collection.as_deref())?;
 
     let existing_lock: Option<LockFile> = if std::path::Path::new("unified.lock").exists() {
         Some(toml::from_str(&std::fs::read_to_string("unified.lock")?)?)
@@ -410,9 +534,12 @@ fn cmd_update() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut updated = 0;
-    let mut locked_repos = std::collections::HashMap::new();
+    let mut locked_repos = existing_lock
+        .as_ref()
+        .map(|l| l.repos.clone())
+        .unwrap_or_default();
 
-    for (name, repo) in &config.repos {
+    for (name, repo) in &active_repos {
         let reference = resolve_reference(repo);
 
         // Only update branch-tracking repos (not pinned to tag/rev)
@@ -483,8 +610,27 @@ fn cmd_update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_status(
+    cli_collection: Option<&str>,
+    cli_all: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+
+    // Validate collections
+    let validation_errors = config.validate_collections();
+    if !validation_errors.is_empty() {
+        for e in &validation_errors {
+            eprintln!("error: {}", e);
+        }
+        return Err(format!("{} collection validation error(s)", validation_errors.len()).into());
+    }
+
+    let active_collection = resolve_active_collection(cli_collection, cli_all);
+    if let Some(ref name) = active_collection {
+        println!("Using collection: {}", name);
+    }
+
+    let active_repos = config.repos_for_collection(active_collection.as_deref())?;
 
     let existing_lock: Option<LockFile> = if std::path::Path::new("unified.lock").exists() {
         Some(toml::from_str(&std::fs::read_to_string("unified.lock")?)?)
@@ -492,16 +638,16 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    if config.repos.is_empty() {
+    if active_repos.is_empty() {
         println!("No repos configured.");
         return Ok(());
     }
 
-    let mut names: Vec<&String> = config.repos.keys().collect();
+    let mut names: Vec<&String> = active_repos.keys().collect();
     names.sort();
 
     for name in names {
-        let repo = &config.repos[name];
+        let repo = &active_repos[name];
         let workspace_path = std::env::current_dir()?.join(&repo.path);
 
         if !workspace_path.exists() {
@@ -654,13 +800,24 @@ fn cmd_remove(name: String) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn update_gitignore(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    update_gitignore_for_repos(&config.repos)
+}
+
+fn update_gitignore_for_repos(
+    repos: &std::collections::HashMap<String, un_core::Repo>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let gitignore_path = ".gitignore";
     let managed_block_start = "# BEGIN UNIFIED MANAGED BLOCK - DO NOT EDIT\n";
     let managed_block_end = "# END UNIFIED MANAGED BLOCK\n";
 
-    // Collect paths to ignore
-    let mut ignore_paths: Vec<&str> = config.repos.values().map(|r| r.path.as_str()).collect();
+    // Collect paths to ignore (include .unified/ for user config)
+    let mut ignore_paths: Vec<&str> = repos.values().map(|r| r.path.as_str()).collect();
     ignore_paths.sort();
+    // Always ignore the .unified/ directory
+    if !ignore_paths.contains(&".unified/") {
+        ignore_paths.push(".unified/");
+        ignore_paths.sort();
+    }
 
     // Read existing .gitignore
     let existing_content = if std::path::Path::new(gitignore_path).exists() {
@@ -719,6 +876,12 @@ fn update_gitignore(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn update_vscode_settings(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    update_vscode_settings_for_repos(&config.repos)
+}
+
+fn update_vscode_settings_for_repos(
+    repos: &std::collections::HashMap<String, un_core::Repo>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;
 
     let settings_dir = Path::new(".vscode");
@@ -735,7 +898,7 @@ fn update_vscode_settings(config: &Config) -> Result<(), Box<dyn std::error::Err
         serde_json::json!({})
     };
 
-    let mut ignored_repos: Vec<&str> = config.repos.values().map(|r| r.path.as_str()).collect();
+    let mut ignored_repos: Vec<&str> = repos.values().map(|r| r.path.as_str()).collect();
     ignored_repos.sort();
 
     if let serde_json::Value::Object(ref mut map) = settings {
@@ -748,5 +911,128 @@ fn update_vscode_settings(config: &Config) -> Result<(), Box<dyn std::error::Err
     let content = serde_json::to_string_pretty(&settings)?;
     std::fs::write(&settings_path, content)?;
     println!("Updated .vscode/settings.json");
+    Ok(())
+}
+
+fn cmd_collection(sub: CollectionCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match sub {
+        CollectionCommand::Use { name, clear } => cmd_collection_use(name, clear),
+        CollectionCommand::List => cmd_collection_list(),
+        CollectionCommand::Show { name } => cmd_collection_show(&name),
+    }
+}
+
+fn cmd_collection_use(
+    name: Option<String>,
+    clear: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace_root = std::env::current_dir()?;
+
+    if clear {
+        let mut uc = UserConfig::load(&workspace_root);
+        uc.default_collection = None;
+        uc.save(&workspace_root)?;
+        println!("Cleared default collection.");
+        return Ok(());
+    }
+
+    let name = name.ok_or("provide a collection name, or use --clear to remove the default")?;
+
+    // Validate that the collection exists
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+    if !config.collections.contains_key(&name) {
+        return Err(format!(
+            "collection \"{}\" not found in unified.toml\nAvailable: {}",
+            name,
+            config
+                .collections
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
+    }
+
+    let mut uc = UserConfig::load(&workspace_root);
+    uc.default_collection = Some(name.clone());
+    uc.save(&workspace_root)?;
+    println!("Default collection set to \"{}\".", name);
+    println!("Run `un sync` to sync only this collection's repos.");
+    Ok(())
+}
+
+fn cmd_collection_list() -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+
+    if config.collections.is_empty() {
+        println!("No collections defined in unified.toml.");
+        return Ok(());
+    }
+
+    // Check active collection
+    let active = resolve_active_collection(None, false);
+
+    let mut names: Vec<&String> = config.collections.keys().collect();
+    names.sort();
+
+    for name in names {
+        let coll = &config.collections[name];
+        let marker = if active.as_deref() == Some(name.as_str()) {
+            " (active)"
+        } else {
+            ""
+        };
+        println!(
+            "  {} — {} member(s){}",
+            name,
+            coll.member_count(),
+            marker
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_collection_show(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+
+    let coll = config
+        .collections
+        .get(name)
+        .ok_or_else(|| format!("collection \"{}\" not found in unified.toml", name))?;
+
+    println!("Collection: {}", name);
+
+    if !coll.repos.is_empty() {
+        println!("  Repos:");
+        for r in &coll.repos {
+            let path = config
+                .repos
+                .get(r)
+                .map(|repo| repo.path.as_str())
+                .unwrap_or("(unknown)");
+            println!("    {} → {}", r, path);
+        }
+    }
+
+    if !coll.artifacts.is_empty() {
+        println!("  Artifacts:");
+        for a in &coll.artifacts {
+            println!("    {}", a);
+        }
+    }
+
+    if !coll.tools.is_empty() {
+        println!("  Tools:");
+        for t in &coll.tools {
+            println!("    {}", t);
+        }
+    }
+
+    if coll.member_count() == 0 {
+        println!("  (empty)");
+    }
+
     Ok(())
 }

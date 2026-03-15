@@ -3,5 +3,6 @@ tests/test_data/
 # ignore because we use it for testing
 unified.lock
 # BEGIN UNIFIED MANAGED BLOCK - DO NOT EDIT
+.unified/
 tests/repos/test-repo
 # END UNIFIED MANAGED BLOCK
