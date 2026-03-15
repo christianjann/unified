@@ -126,12 +126,12 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 
 **Goal:** Developers can make changes, commit, and push from worktree-mode workspace repos. These are convenience wrappers around git, run inside the repo's workspace path.
 
-- [ ] `un branch <repo> <name>` — `git checkout -b <name>` in worktree
-- [ ] `un commit <repo> [-m msg]` — `git commit -a` in worktree (opens $EDITOR if no -m)
-- [ ] `un push <repo>` — `git push` in worktree
-- [ ] `un diff [<repo>]` — `git diff` in one or all worktree repos
-- [ ] `un log <repo> [-n N]` — `git log --oneline` in worktree
-- [ ] Error on copy-mode repos with clear message: "repo X is in copy mode, switch to worktree for git operations"
+- [X] `un branch <repo> <name>` — `git checkout -b <name>` in worktree
+- [X] `un commit <repo> [-m msg]` — `git commit -a` in worktree (opens $EDITOR if no -m)
+- [X] `un push <repo>` — `git push` in worktree
+- [X] `un diff [<repo>]` — `git diff` in one or all worktree repos
+- [X] `un log <repo> [-n N]` — `git log --oneline` in worktree
+- [X] Error on copy-mode repos with clear message: "repo X is in copy mode, switch to worktree for git operations"
 
 ### Phase 5: Artifact, tool, and app management
 

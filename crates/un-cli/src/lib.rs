@@ -94,6 +94,45 @@ pub enum Commands {
         /// Name of the repo to remove
         name: String,
     },
+    /// Create a new branch in a worktree-mode repo
+    Branch {
+        /// Name of the repo
+        repo: String,
+        /// Branch name to create
+        name: String,
+    },
+    /// Commit all changes in a worktree-mode repo
+    Commit {
+        /// Name of the repo
+        repo: String,
+        /// Commit message (opens $EDITOR if omitted)
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Push a worktree-mode repo
+    Push {
+        /// Name of the repo
+        repo: String,
+    },
+    /// Show git diff for one or all worktree-mode repos
+    Diff {
+        /// Name of the repo (shows all if omitted)
+        repo: Option<String>,
+        /// Diff only the named collection
+        #[arg(long)]
+        collection: Option<String>,
+        /// Diff all repos, ignoring active collection
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show git log for a worktree-mode repo
+    Log {
+        /// Name of the repo
+        repo: String,
+        /// Number of commits to show
+        #[arg(short = 'n', long, default_value = "10")]
+        count: usize,
+    },
     /// Manage collections
     #[command(subcommand)]
     Collection(CollectionCommand),
@@ -199,20 +238,17 @@ fn resolve_reference(repo: &un_core::Repo) -> GitReference {
 
 /// Resolve the active collection from CLI flag → env var → user.toml → None.
 /// Returns None if `--all` is set.
-fn resolve_active_collection(
-    cli_collection: Option<&str>,
-    cli_all: bool,
-) -> Option<String> {
+fn resolve_active_collection(cli_collection: Option<&str>, cli_all: bool) -> Option<String> {
     if cli_all {
         return None;
     }
     if let Some(name) = cli_collection {
         return Some(name.to_string());
     }
-    if let Ok(val) = std::env::var("UN_COLLECTION") {
-        if !val.is_empty() {
-            return Some(val);
-        }
+    if let Ok(val) = std::env::var("UN_COLLECTION")
+        && !val.is_empty()
+    {
+        return Some(val);
     }
     let workspace_root = std::env::current_dir().ok()?;
     let user_config = UserConfig::load(&workspace_root);
@@ -231,12 +267,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             collection,
             all,
         } => cmd_sync(locked, frozen, shallow, collection.as_deref(), all)?,
-        Commands::Update { collection, all } => {
-            cmd_update(collection.as_deref(), all)?
-        }
-        Commands::Status { collection, all } => {
-            cmd_status(collection.as_deref(), all)?
-        }
+        Commands::Update { collection, all } => cmd_update(collection.as_deref(), all)?,
+        Commands::Status { collection, all } => cmd_status(collection.as_deref(), all)?,
         Commands::Add {
             url,
             name,
@@ -246,6 +278,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             rev,
         } => cmd_add(url, name, path, branch, tag, rev)?,
         Commands::Remove { name } => cmd_remove(name)?,
+        Commands::Branch { repo, name } => cmd_branch(&repo, &name)?,
+        Commands::Commit { repo, message } => cmd_commit(&repo, message.as_deref())?,
+        Commands::Push { repo } => cmd_push(&repo)?,
+        Commands::Diff {
+            repo,
+            collection,
+            all,
+        } => cmd_diff(repo.as_deref(), collection.as_deref(), all)?,
+        Commands::Log { repo, count } => cmd_log(&repo, count)?,
         Commands::Collection(sub) => cmd_collection(sub)?,
         Commands::Version => cmd_version(),
         Commands::About => cmd_about(),
@@ -258,8 +299,7 @@ fn cmd_version() {
 }
 
 fn cmd_about() {
-    if let Ok(banner) = Banner::new("un - Unified Repo")
-        .map(|b| b.style(Style::NeonCyber).render())
+    if let Ok(banner) = Banner::new("un - Unified Repo").map(|b| b.style(Style::NeonCyber).render())
     {
         println!("{banner}");
     }
@@ -438,15 +478,8 @@ fn cmd_sync(
 
     // Write lock file with config hash
     // When syncing a collection, merge new results into existing lock (don't drop unsynced repos)
-    let mut all_locked_repos = existing_lock
-        .map(|l| l.repos)
-        .unwrap_or_default();
-    all_locked_repos.extend(
-        Arc::try_unwrap(locked_repos)
-            .unwrap()
-            .into_inner()
-            .unwrap(),
-    );
+    let mut all_locked_repos = existing_lock.map(|l| l.repos).unwrap_or_default();
+    all_locked_repos.extend(Arc::try_unwrap(locked_repos).unwrap().into_inner().unwrap());
     let lock_file = LockFile {
         version: 1,
         config_hash: Some(current_hash),
@@ -841,6 +874,154 @@ fn cmd_remove(name: String) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Look up a repo by name, validate it exists and is in worktree mode.
+fn require_worktree_repo<'a>(
+    config: &'a Config,
+    name: &str,
+) -> Result<(&'a un_core::Repo, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let repo = config
+        .repos
+        .get(name)
+        .ok_or_else(|| format!("repo '{}' not found in unified.toml", name))?;
+
+    let mode = resolve_checkout_mode(repo);
+    match mode {
+        CheckoutMode::Copy | CheckoutMode::FilteredCopy { .. } => {
+            return Err(format!(
+                "repo '{}' is in copy mode, switch to worktree for git operations",
+                name
+            )
+            .into());
+        }
+        _ => {}
+    }
+
+    let workspace_path = std::env::current_dir()?.join(&repo.path);
+    if !workspace_path.exists() {
+        return Err(format!("repo '{}' is not synced yet (run `un sync` first)", name).into());
+    }
+
+    Ok((repo, workspace_path))
+}
+
+fn cmd_branch(repo_name: &str, branch_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+    let (_repo, workspace_path) = require_worktree_repo(&config, repo_name)?;
+
+    let status = std::process::Command::new("git")
+        .args(["checkout", "-b", branch_name])
+        .current_dir(&workspace_path)
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("git checkout -b failed for '{}'", repo_name).into());
+    }
+
+    println!("Created branch '{}' in {}", branch_name, repo_name);
+    Ok(())
+}
+
+fn cmd_commit(repo_name: &str, message: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+    let (_repo, workspace_path) = require_worktree_repo(&config, repo_name)?;
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("commit").arg("-a");
+    if let Some(msg) = message {
+        cmd.args(["-m", msg]);
+    }
+    // Inherit stdin/stdout/stderr so $EDITOR works when no -m is given
+    let status = cmd.current_dir(&workspace_path).status()?;
+
+    if !status.success() {
+        return Err(format!("git commit failed for '{}'", repo_name).into());
+    }
+
+    Ok(())
+}
+
+fn cmd_push(repo_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+    let (_repo, workspace_path) = require_worktree_repo(&config, repo_name)?;
+
+    let status = std::process::Command::new("git")
+        .arg("push")
+        .current_dir(&workspace_path)
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("git push failed for '{}'", repo_name).into());
+    }
+
+    Ok(())
+}
+
+fn cmd_diff(
+    repo_name: Option<&str>,
+    cli_collection: Option<&str>,
+    cli_all: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+
+    if let Some(name) = repo_name {
+        // Single repo
+        let (_repo, workspace_path) = require_worktree_repo(&config, name)?;
+        let status = std::process::Command::new("git")
+            .arg("diff")
+            .current_dir(&workspace_path)
+            .status()?;
+        if !status.success() {
+            return Err(format!("git diff failed for '{}'", name).into());
+        }
+    } else {
+        // All repos (respecting collection)
+        let active_collection = resolve_active_collection(cli_collection, cli_all);
+        let active_repos = config.repos_for_collection(active_collection.as_deref())?;
+        let mut names: Vec<&String> = active_repos.keys().collect();
+        names.sort();
+
+        for name in names {
+            let repo = &active_repos[name];
+            let mode = resolve_checkout_mode(repo);
+            if matches!(mode, CheckoutMode::Copy | CheckoutMode::FilteredCopy { .. }) {
+                continue; // Skip copy-mode repos silently
+            }
+            let workspace_path = std::env::current_dir()?.join(&repo.path);
+            if !workspace_path.exists() {
+                continue;
+            }
+
+            let output = std::process::Command::new("git")
+                .arg("diff")
+                .current_dir(&workspace_path)
+                .output()?;
+
+            if !output.stdout.is_empty() {
+                println!("── {} ──", name);
+                print!("{}", String::from_utf8_lossy(&output.stdout));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_log(repo_name: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str(&std::fs::read_to_string("unified.toml")?)?;
+    let (_repo, workspace_path) = require_worktree_repo(&config, repo_name)?;
+
+    let status = std::process::Command::new("git")
+        .args(["log", "--oneline", "-n", &count.to_string()])
+        .current_dir(&workspace_path)
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("git log failed for '{}'", repo_name).into());
+    }
+
+    Ok(())
+}
+
 fn update_gitignore(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     update_gitignore_for_repos(&config.repos)
 }
@@ -964,10 +1145,7 @@ fn cmd_collection(sub: CollectionCommand) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-fn cmd_collection_use(
-    name: Option<String>,
-    clear: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_collection_use(name: Option<String>, clear: bool) -> Result<(), Box<dyn std::error::Error>> {
     let workspace_root = std::env::current_dir()?;
 
     if clear {
@@ -1025,12 +1203,7 @@ fn cmd_collection_list() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             ""
         };
-        println!(
-            "  {} — {} member(s){}",
-            name,
-            coll.member_count(),
-            marker
-        );
+        println!("  {} — {} member(s){}", name, coll.member_count(), marker);
     }
 
     Ok(())

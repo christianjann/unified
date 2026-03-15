@@ -165,7 +165,11 @@ where
         .filter_map(|c| {
             let c_lower = c.to_lowercase();
             let dist = levenshtein(&target_lower, &c_lower);
-            if dist <= 2 { Some((dist, c.clone())) } else { None }
+            if dist <= 2 {
+                Some((dist, c.clone()))
+            } else {
+                None
+            }
         })
         .min_by_key(|(d, _)| *d)
         .map(|(_, name)| name)
@@ -176,11 +180,11 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let mut dp = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for i in 0..=a.len() {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate().take(a.len() + 1) {
+        row[0] = i;
     }
-    for j in 0..=b.len() {
-        dp[0][j] = j;
+    for (j, val) in dp[0].iter_mut().enumerate().take(b.len() + 1) {
+        *val = j;
     }
     for i in 1..=a.len() {
         for j in 1..=b.len() {
@@ -294,27 +298,45 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.collections.len(), 2);
-        assert_eq!(config.collections["embedded"].repos, vec!["firmware", "protocol"]);
+        assert_eq!(
+            config.collections["embedded"].repos,
+            vec!["firmware", "protocol"]
+        );
         assert_eq!(config.collections["frontend"].repos, vec!["web-ui"]);
     }
 
     #[test]
     fn test_collection_validation_valid() {
         let mut repos = HashMap::new();
-        repos.insert("firmware".to_string(), Repo {
-            url: "https://example.com/firmware.git".to_string(),
-            path: "firmware".to_string(),
-            branch: None, tag: None, rev: None, checkout: None,
-            include: None, exclude: None, shallow: None,
-        });
+        repos.insert(
+            "firmware".to_string(),
+            Repo {
+                url: "https://example.com/firmware.git".to_string(),
+                path: "firmware".to_string(),
+                branch: None,
+                tag: None,
+                rev: None,
+                checkout: None,
+                include: None,
+                exclude: None,
+                shallow: None,
+            },
+        );
         let mut collections = HashMap::new();
-        collections.insert("team".to_string(), Collection {
-            repos: vec!["firmware".to_string()],
-            artifacts: vec![],
-            tools: vec![],
-        });
+        collections.insert(
+            "team".to_string(),
+            Collection {
+                repos: vec!["firmware".to_string()],
+                artifacts: vec![],
+                tools: vec![],
+            },
+        );
         let config = Config {
-            workspace: Workspace { name: "test".to_string(), members: None, exclude: None },
+            workspace: Workspace {
+                name: "test".to_string(),
+                members: None,
+                exclude: None,
+            },
             settings: None,
             repos,
             collections,
@@ -325,20 +347,35 @@ mod tests {
     #[test]
     fn test_collection_validation_unknown_repo() {
         let mut repos = HashMap::new();
-        repos.insert("firmware".to_string(), Repo {
-            url: "https://example.com/firmware.git".to_string(),
-            path: "firmware".to_string(),
-            branch: None, tag: None, rev: None, checkout: None,
-            include: None, exclude: None, shallow: None,
-        });
+        repos.insert(
+            "firmware".to_string(),
+            Repo {
+                url: "https://example.com/firmware.git".to_string(),
+                path: "firmware".to_string(),
+                branch: None,
+                tag: None,
+                rev: None,
+                checkout: None,
+                include: None,
+                exclude: None,
+                shallow: None,
+            },
+        );
         let mut collections = HashMap::new();
-        collections.insert("team".to_string(), Collection {
-            repos: vec!["firmwrae".to_string()], // typo
-            artifacts: vec![],
-            tools: vec![],
-        });
+        collections.insert(
+            "team".to_string(),
+            Collection {
+                repos: vec!["firmwrae".to_string()], // typo
+                artifacts: vec![],
+                tools: vec![],
+            },
+        );
         let config = Config {
-            workspace: Workspace { name: "test".to_string(), members: None, exclude: None },
+            workspace: Workspace {
+                name: "test".to_string(),
+                members: None,
+                exclude: None,
+            },
             settings: None,
             repos,
             collections,
@@ -352,24 +389,49 @@ mod tests {
     #[test]
     fn test_repos_for_collection() {
         let mut repos = HashMap::new();
-        repos.insert("a".to_string(), Repo {
-            url: "u".to_string(), path: "a".to_string(),
-            branch: None, tag: None, rev: None, checkout: None,
-            include: None, exclude: None, shallow: None,
-        });
-        repos.insert("b".to_string(), Repo {
-            url: "u".to_string(), path: "b".to_string(),
-            branch: None, tag: None, rev: None, checkout: None,
-            include: None, exclude: None, shallow: None,
-        });
+        repos.insert(
+            "a".to_string(),
+            Repo {
+                url: "u".to_string(),
+                path: "a".to_string(),
+                branch: None,
+                tag: None,
+                rev: None,
+                checkout: None,
+                include: None,
+                exclude: None,
+                shallow: None,
+            },
+        );
+        repos.insert(
+            "b".to_string(),
+            Repo {
+                url: "u".to_string(),
+                path: "b".to_string(),
+                branch: None,
+                tag: None,
+                rev: None,
+                checkout: None,
+                include: None,
+                exclude: None,
+                shallow: None,
+            },
+        );
         let mut collections = HashMap::new();
-        collections.insert("partial".to_string(), Collection {
-            repos: vec!["a".to_string()],
-            artifacts: vec![],
-            tools: vec![],
-        });
+        collections.insert(
+            "partial".to_string(),
+            Collection {
+                repos: vec!["a".to_string()],
+                artifacts: vec![],
+                tools: vec![],
+            },
+        );
         let config = Config {
-            workspace: Workspace { name: "t".to_string(), members: None, exclude: None },
+            workspace: Workspace {
+                name: "t".to_string(),
+                members: None,
+                exclude: None,
+            },
             settings: None,
             repos,
             collections,
@@ -425,7 +487,9 @@ mod tests {
         };
         uc.save(dir.path()).unwrap();
 
-        let cleared = UserConfig { default_collection: None };
+        let cleared = UserConfig {
+            default_collection: None,
+        };
         cleared.save(dir.path()).unwrap();
 
         let loaded = UserConfig::load(dir.path());

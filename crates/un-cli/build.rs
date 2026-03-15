@@ -23,35 +23,30 @@ fn main() {
     }
 
     // Capture commit hash
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
+    if let Ok(output) = Command::new("git").args(["rev-parse", "HEAD"]).output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:rustc-env=UN_COMMIT_HASH={hash}");
-        }
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rustc-env=UN_COMMIT_HASH={hash}");
     }
 
     // Capture short commit hash
     if let Ok(output) = Command::new("git")
         .args(["rev-parse", "--short=9", "HEAD"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:rustc-env=UN_COMMIT_SHORT_HASH={hash}");
-        }
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rustc-env=UN_COMMIT_SHORT_HASH={hash}");
     }
 
     // Capture commit date
     if let Ok(output) = Command::new("git")
         .args(["log", "-1", "--date=short", "--format=%cd"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let date = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:rustc-env=UN_COMMIT_DATE={date}");
-        }
+        let date = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rustc-env=UN_COMMIT_DATE={date}");
     }
 }
