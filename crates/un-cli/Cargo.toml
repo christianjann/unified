@@ -14,3 +14,6 @@ un-cache = { path = "../un-cache" }
 un-git = { path = "../un-git" }
 toml.workspace = true
 serde_json.workspace = true
+anyhow.workspace = true
+indicatif.workspace = true
+sha2.workspace = true

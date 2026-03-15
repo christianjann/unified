@@ -25,7 +25,7 @@ pub struct Workspace {
     pub exclude: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     pub git_fetch_with_cli: Option<bool>,
     pub parallel: Option<usize>,
@@ -35,7 +35,7 @@ pub struct Settings {
     pub manage_vscode: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Repo {
     pub url: String,
     pub path: String,
@@ -51,6 +51,8 @@ pub struct Repo {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LockFile {
     pub version: u32,
+    #[serde(default)]
+    pub config_hash: Option<String>,
     #[serde(default)]
     pub repos: HashMap<String, LockedRepo>,
     // Add artifacts, tools, etc. later
@@ -105,12 +107,19 @@ mod tests {
         assert_eq!(config.workspace.name, deserialized.workspace.name);
         assert_eq!(config.workspace.members, deserialized.workspace.members);
         assert_eq!(config.workspace.exclude, deserialized.workspace.exclude);
-        assert_eq!(config.settings.as_ref().unwrap().git_fetch_with_cli, deserialized.settings.as_ref().unwrap().git_fetch_with_cli);
+        assert_eq!(
+            config.settings.as_ref().unwrap().git_fetch_with_cli,
+            deserialized.settings.as_ref().unwrap().git_fetch_with_cli
+        );
     }
 
     #[test]
     fn test_lock_file_serialization() {
-        let lock = LockFile { version: 1, repos: HashMap::new() };
+        let lock = LockFile {
+            version: 1,
+            config_hash: None,
+            repos: HashMap::new(),
+        };
         let toml_str = toml::to_string(&lock).unwrap();
         let deserialized: LockFile = toml::from_str(&toml_str).unwrap();
         assert_eq!(lock.version, deserialized.version);

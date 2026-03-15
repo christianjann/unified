@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 pub struct Cache {
     root: PathBuf,
@@ -63,8 +63,14 @@ mod tests {
 
         assert_eq!(cache.root(), Path::new("tests/test_cache"));
         assert_eq!(cache.git_db(), PathBuf::from("tests/test_cache/git/db"));
-        assert_eq!(cache.git_checkouts(), PathBuf::from("tests/test_cache/git/checkouts"));
-        assert_eq!(cache.artifacts(), PathBuf::from("tests/test_cache/artifacts"));
+        assert_eq!(
+            cache.git_checkouts(),
+            PathBuf::from("tests/test_cache/git/checkouts")
+        );
+        assert_eq!(
+            cache.artifacts(),
+            PathBuf::from("tests/test_cache/artifacts")
+        );
         assert_eq!(cache.tools(), PathBuf::from("tests/test_cache/tools"));
         assert_eq!(cache.apps(), PathBuf::from("tests/test_cache/apps"));
         assert_eq!(cache.bin(), PathBuf::from("tests/test_cache/bin"));

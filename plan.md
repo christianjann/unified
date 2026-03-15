@@ -81,8 +81,8 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 - [X] Implement `GitCheckout` — sparse worktree (include/exclude → sparse-checkout with negation)
 - [X] Implement `GitCheckout` — filtered copy (checkout=copy + include/exclude → glob-matched walk+copy)
 - [X] Implement shallow clone (`--depth 1`, orthogonal to checkout mode)
-- [ ] Implement `--shallow` CLI flag and `UN_SHALLOW` env var
-- [ ] Atomic operations: `.unified-ok` markers, temp dirs
+- [X] Implement `--shallow` CLI flag and `UN_SHALLOW` env var
+- [X] Atomic operations: `.unified-ok` markers, temp dirs
 - [X] Integration test: `un sync` with file:// git repo
 
 ### Phase 3: Core commands
@@ -94,14 +94,14 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 - [X] `un sync` — auto-update `.vscode/settings.json` (`git.ignoredRepositories`)
 - [X] `settings.manage-gitignore` / `settings.manage-vscode` opt-out flags
 - [X] Deduplicated `GitReference` — single definition in `un-core`, used by all crates
-- [ ] `un sync --locked` — fail if config changed since lock
-- [ ] `un sync --frozen` — no network, cache-only
-- [ ] `un status` — report clean/modified/ahead-behind per repo
-- [ ] `un update` — fetch latest for branch-tracking repos, update lock
-- [ ] `un add <url>` — add repo to config, sync
-- [ ] `un remove <name>` — remove from config, lock, workspace
-- [ ] Parallel git fetches with semaphore
-- [ ] Progress bars (indicatif MultiProgress)
+- [X] `un sync --locked` — fail if config changed since lock
+- [X] `un sync --frozen` — no network, cache-only
+- [X] `un status` — report clean/modified/ahead-behind per repo
+- [X] `un update` — fetch latest for branch-tracking repos, update lock
+- [X] `un add <url>` — add repo to config, sync
+- [X] `un remove <name>` — remove from config, lock, workspace
+- [X] Parallel git fetches with semaphore
+- [X] Progress bars (indicatif MultiProgress)
 
 ### Phase 3.5: Collections
 
