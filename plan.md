@@ -52,6 +52,7 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 | Tool execution | `un run <tool>` subcommand | Simpler than separate binary, discoverable |
 | Config format | Named sections `[repos.<name>]` | Familiar to Cargo users, easy to reference |
 | Scope | Workspace-first | Per-project `unified.toml`, global tools via `un tool install` |
+| Collections | Named groups in config + user-local default | Allows partial sync (permissions, speed), stored in `.unified/user.toml` (git-ignored) |
 
 ## Implementation Phases
 
@@ -100,6 +101,25 @@ See [README.md](README.md) for user-facing documentation and [doc/architecture.m
 - [ ] `un remove <name>` — remove from config, lock, workspace
 - [ ] Parallel git fetches with semaphore
 - [ ] Progress bars (indicatif MultiProgress)
+
+### Phase 3.5: Collections
+
+**Goal:** Developers can sync a named subset of the workspace. Useful when not everyone needs — or has permission to clone — every repo.
+
+- [ ] `[collections.<name>]` config schema — `repos`, `artifacts`, `tools` arrays referencing names
+- [ ] Validation — error if a collection references a name not defined in `[repos.*]`/`[artifacts.*]`/`[tools.*]`
+- [ ] Resolver filters operations to active collection before executing
+- [ ] `un sync --collection <name>` — sync only the named collection
+- [ ] `un sync --all` — sync everything, ignoring active collection
+- [ ] `.unified/user.toml` — user-local config file (git-ignored), stores `default-collection`
+- [ ] `un collection use <name>` — write `default-collection` to `.unified/user.toml`
+- [ ] `un collection use --clear` — remove `default-collection`
+- [ ] `un collection list` — list collections with member counts
+- [ ] `un collection show <name>` — list repos/artifacts/tools in the collection
+- [ ] `UN_COLLECTION` env var override
+- [ ] `un status`, `un diff`, `un exec`, `un update` respect active collection; `--all` overrides
+- [ ] `.gitignore` and `.vscode/settings.json` only list paths for the active collection's repos
+- [ ] Unit tests: collection resolution, validation, user.toml round-trip
 
 ### Phase 4: Git workflow commands
 
@@ -176,3 +196,6 @@ Note: Tasks are intentionally minimal. For complex build workflows, prefer [just
 8. `un run <tool>` — Downloads and executes a tool from GitHub Releases
 9. Corporate proxy — Works with `git-fetch-with-cli = true`
 10. CI — `un sync` in clean Docker container (no prior cache)
+11. `un sync --collection <name>` — Only syncs repos/artifacts in the named collection
+12. `un collection use <name>` — Persists default collection in `.unified/user.toml`
+13. `un sync --all` — Ignores active collection and syncs everything

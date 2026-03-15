@@ -87,6 +87,7 @@ unified.toml ──→ Config ──→ Resolver ──→ Operations ──→ 
 2. **Read lock file** (if exists) — Parse `unified.lock` into `LockFile` struct. Each locked entry contains the exact revision SHA or artifact checksum.
 
 3. **Resolve** — For each repo/artifact in config:
+   - Apply active collection filter (if any) — keep only items named in the collection
    - If lock file has a matching entry and config hasn't changed → use locked revision (fast path, no network)
    - If `--locked` flag → fail if config changed since lock was written
    - If `--frozen` flag → fail if entry not in lock (no network allowed)
@@ -109,6 +110,7 @@ unified.toml ──→ Config ──→ Resolver ──→ Operations ──→ 
 | Mode | Network | Reads lock | Writes lock | Fails if |
 |------|---------|-----------|------------|----------|
 | `un sync` | Yes | Yes (fast path) | Yes | Never (unless network error) |
+| `un sync --collection X` | Yes | Yes (fast path) | Yes (collection items only) | Collection name not found |
 | `un sync --shallow` | Yes | Yes (fast path) | Yes | Never (shallow clone all repos, sparse-checkout if `include` set) |
 | `un sync --locked` | Yes | Yes (required) | No | Config changed since lock |
 | `un sync --frozen` | No | Yes (required) | No | Entry missing from lock/cache |
@@ -483,10 +485,11 @@ The workspace tracks which cache entries are checked out where via internal meta
 ```
 .unified/                            # Workspace metadata (in workspace root)
 ├── state.toml                       # Maps workspace paths → cache entries
+├── user.toml                        # User-local preferences (default-collection, etc.)
 └── worktrees/                       # Worktree metadata (git internals)
 ```
 
-This `.unified/` directory in the workspace root (not the cache) stores the mapping between workspace paths and cache entries. It is auto-added to `.gitignore`.
+This `.unified/` directory in the workspace root (not the cache) stores the mapping between workspace paths and cache entries, plus user-local preferences. It is auto-added to `.gitignore`.
 
 ### Workspace Integration
 
@@ -648,6 +651,110 @@ Generation happens during `un sync`. Each entry resolves to a shell command:
 - `app = "..."` → `un app <name>`
 - `task = "..."` → `un task <name>`
 - `cmd = "..."` → literal command
+
+## Collections
+
+Collections let developers sync a named subset of the workspace. This solves two real problems:
+
+1. **Permissions** — Not every developer has access to every private repo. Without collections, `un sync` fails on the first inaccessible repo. With collections, a developer selects only the repos they can reach.
+2. **Speed / disk** — Large workspaces may define dozens of repos. A frontend developer doesn't need the firmware repos, and a CI pipeline may only need two.
+
+### Config Schema
+
+Collections are defined in `unified.toml` alongside the items they reference:
+
+```toml
+[collections.firmware-team]
+repos = ["firmware", "protocol", "shared-libs"]     # Names from [repos.*]
+artifacts = ["test-vectors", "firmware-binary"]       # Names from [artifacts.*]
+tools = ["protoc"]                                     # Names from [tools.*]
+
+[collections.frontend]
+repos = ["design-system", "monorepo"]
+artifacts = ["internal-sdk"]
+```
+
+All three arrays are optional — omitting `tools` means no tools are filtered (they're all available). A name can appear in multiple collections.
+
+### Validation
+
+During config parsing, every name in a collection is checked against the corresponding `[repos.*]`, `[artifacts.*]`, or `[tools.*]` section. An unknown name is a hard error:
+
+```
+error: collection "firmware-team" references unknown repo "firmwrae"
+  → did you mean "firmware"?
+```
+
+### Resolution Filtering
+
+The active collection is determined by this precedence (highest first):
+
+```
+--collection <name>  CLI flag (per-invocation)
+       ↓
+UN_COLLECTION        env var (per-shell / CI)
+       ↓
+user.toml            default-collection (per-machine)
+       ↓
+(none)               sync everything
+```
+
+The resolver applies the active collection as a filter **before** executing operations:
+
+```
+unified.toml ──→ Config ──→ Collection Filter ──→ Resolver ──→ Operations
+                                  │
+                                  │ keep only repos/artifacts/tools
+                                  │ named in the active collection
+                                  ▼
+                           Filtered Config
+```
+
+If no collection is active (no flag, no env var, no `user.toml` default), all items are included — the existing behavior.
+
+`--all` explicitly bypasses the collection filter, even if a default is set in `user.toml`.
+
+### Effect on Other Commands
+
+When a collection is active, these commands operate only on the collection's items:
+
+| Command | Behavior with active collection |
+|---------|-------------------------------|
+| `un sync` | Fetch/checkout only collection repos, download only collection artifacts/tools |
+| `un status` | Show status only for collection repos |
+| `un diff` | Show diffs only for collection repos |
+| `un exec` | Run command only in collection repos |
+| `un update` | Update only collection repos/artifacts |
+
+All accept `--all` to override. Commands that operate on a single named item (`un run <tool>`, `un app <name>`, `un task <name>`) are not filtered — they work regardless of the active collection.
+
+### Workspace Integration with Collections
+
+`.gitignore` and `.vscode/settings.json` are updated to reflect only the paths that were actually checked out. When a collection is active, only that collection's repo paths appear in the managed blocks. Switching collections and re-syncing updates these files accordingly.
+
+## User-Local Config
+
+Per-machine preferences live in `.unified/user.toml` inside the workspace root. This file is git-ignored (the entire `.unified/` directory is listed in the managed `.gitignore` block) and is never committed.
+
+```toml
+# .unified/user.toml
+default-collection = "firmware-team"
+```
+
+### Supported Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `default-collection` | `String` | Active collection name. Omit or remove to sync everything. |
+
+Future user-local preferences (e.g., override `parallel`, local tool paths) can be added here without polluting the shared `unified.toml`.
+
+### File Lifecycle
+
+- **Created by**: `un collection use <name>` (creates `.unified/` dir if needed)
+- **Cleared by**: `un collection use --clear` (removes the `default-collection` key)
+- **Read by**: Every command that resolves the active collection
+- **Never written by**: `un sync`, `un init` (they don't touch user preferences)
 
 The generated script is self-contained — it doesn't require `un` to be installed (entries using `app` or `task` do invoke `un`, but `cmd` entries are plain shell).
 

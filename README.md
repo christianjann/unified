@@ -28,6 +28,7 @@ Modern software projects span multiple repositories, binary artifacts, and exter
 - **Setup hooks** — `un setup` runs workspace setup commands (IDE extensions, environment config)
 - **Selective checkout** — `include`/`exclude` globs per repo — sparse worktree or filtered copy
 - **CI-optimized** — `--shallow` for depth-1 clones, composes with sparse for minimal transfer
+- **Collections** — Group repos and artifacts into named collections; sync only what you need or have access to
 - **Corporate-friendly** — `git-fetch-with-cli` option for proxy/SSH/credential helper configs
 
 ## Installation
@@ -204,7 +205,30 @@ task = "format"                             # References [tasks.format]
 icon = "✨"
 ```
 
-### 5. Sync the workspace
+### 5. Define collections (optional)
+
+When a workspace has many repos and not every developer needs (or has access to) all of them, group items into named collections:
+
+```toml
+# ─── Collections (named subsets of the workspace) ─────────────────
+
+[collections.firmware-team]
+repos = ["firmware", "protocol", "shared-libs"]
+artifacts = ["test-vectors", "firmware-binary"]
+tools = ["protoc"]
+
+[collections.frontend]
+repos = ["design-system", "monorepo"]
+artifacts = ["internal-sdk"]
+
+[collections.ci-minimal]
+repos = ["firmware", "protocol"]
+artifacts = ["test-vectors"]
+```
+
+Each collection lists names from `[repos.*]`, `[artifacts.*]`, and `[tools.*]`. A repo/artifact can appear in multiple collections.
+
+### 6. Sync the workspace
 
 ```bash
 un sync
@@ -243,7 +267,26 @@ $ un sync
      Done   in 4.2s
 ```
 
-### 6. Check status
+To sync only a specific collection:
+
+```bash
+# Sync only the firmware-team collection
+un sync --collection firmware-team
+
+# Set a default collection for this machine (saved in .unified/user.toml, git-ignored)
+un collection use firmware-team
+
+# Now `un sync` only syncs the firmware-team collection
+un sync
+
+# Sync everything regardless of default collection
+un sync --all
+
+# Clear the default collection (back to syncing everything)
+un collection use --clear
+```
+
+### 7. Check status
 
 ```bash
 $ un status
@@ -296,12 +339,25 @@ For fine-grained git operations (interactive staging, rebase, etc.), `cd` into t
 | `un setup` | Run setup commands from `[setup]` (e.g. install IDE extensions) |
 | `un launch` | Show interactive launcher menu (same as running `./launch.sh`) |
 
+### Collections
+
+| Command | Description |
+|---------|-------------|
+| `un collection list` | List all collections defined in `unified.toml` |
+| `un collection show <name>` | Show repos, artifacts, and tools in a collection |
+| `un collection use <name>` | Set the default collection for this machine (persisted in `.unified/user.toml`) |
+| `un collection use --clear` | Clear the default collection (sync everything) |
+| `un sync --collection <name>` | Sync only a specific collection (overrides default) |
+| `un sync --all` | Sync everything, ignoring the default collection |
+
+Most commands respect the active collection: `un status`, `un diff`, `un exec`, `un update` all filter to the active collection's repos. Use `--all` to override.
+
 ### Utility
 
 | Command | Description |
 |---------|-------------|
 | `un clean` | Remove stale cache entries |
-| `un exec <cmd>` | Run a command in all workspace repos |
+| `un exec <cmd>` | Run a command in all workspace repos (or active collection) |
 | `un exec --filter <pat> <cmd>` | Run a command in matching repos |
 
 ## Configuration Reference
@@ -394,6 +450,13 @@ name = "Custom Command"
 cmd = "code ."                     # Arbitrary shell command
 icon = "📝"
 
+# ─── Collections (named subsets for partial sync) ────────────────
+
+[collections.team-a]
+repos = ["mylib"]                  # Names from [repos.*] (optional)
+artifacts = ["my-artifact"]        # Names from [artifacts.*] (optional)
+tools = ["mytool"]                 # Names from [tools.*] (optional)
+
 # ─── Settings ─────────────────────────────────────────────────────
 
 [settings]
@@ -433,6 +496,21 @@ size = 12345678
 - **`un sync --shallow`** — Shallow-clones all repos (`--depth 1`, no history). Composes with `include` patterns (sparse-checkout). Can combine with `--locked`. Ideal for CI.
 - **`un sync --locked`** — Uses exact versions from `unified.lock`, fails if config changed since last lock
 - **`un sync --frozen`** — Like `--locked`, but also skips network access entirely (uses only cache)
+- **`un sync --collection <name>`** — Sync only repos/artifacts/tools in the named collection
+- **`un sync --all`** — Sync everything, ignoring the active default collection
+
+Flags compose: `un sync --collection ci-minimal --shallow --locked` syncs only the `ci-minimal` collection, using shallow clones and locked versions.
+
+### User-local config (`.unified/user.toml`)
+
+Per-machine preferences that should not be committed (the `.unified/` directory is git-ignored):
+
+```toml
+# .unified/user.toml — written by `un collection use`, not committed
+default-collection = "firmware-team"
+```
+
+When `default-collection` is set, `un sync`, `un status`, `un diff`, `un exec`, and `un update` all operate on only that collection's items. Use `--all` to override, or `un collection use --clear` to remove the default.
 
 ## Cache Layout
 
@@ -484,6 +562,7 @@ Multiple workspaces on the same machine share the git database cache. Fetching a
 | `UN_PARALLEL` | Max parallel operations | `4` |
 | `UN_GIT_FETCH_WITH_CLI` | Force CLI git for all fetches | `false` |
 | `UN_SHALLOW` | Shallow-clone all repos (like `--shallow`) | `false` |
+| `UN_COLLECTION` | Override default collection for this invocation | — |
 
 ## Comparison with Alternatives
 
