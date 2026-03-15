@@ -9,4 +9,7 @@ manage_gitignore = true
 manage_vscode = true
 
 [repos]
-test-repo = { url = "file://./crates/un-cli/tests/test_data/source", path = "crates/un-cli/tests/repos/test-repo" }
+test-repo = { # this is allowed in toml 1.1 https://github.com/toml-lang/toml/releases/tag/1.1.0
+    url = "file://./crates/un-cli/tests/test_data/source", 
+    path = "crates/un-cli/tests/repos/test-repo" 
+}
