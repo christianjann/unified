@@ -45,6 +45,13 @@ impl GitRemote {
     }
 }
 
+/// Convert a canonicalized path to a file:// URL, stripping the Windows \\?\ prefix if present.
+fn path_to_file_url(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    format!("file://{}", s)
+}
+
 fn normalize_url(url: &str) -> String {
     let mut url = url.trim_end_matches('/').to_string();
     if url.starts_with("./") || url.starts_with("../") {
@@ -52,7 +59,7 @@ fn normalize_url(url: &str) -> String {
         if let Ok(cwd) = std::env::current_dir() {
             let abs_path = cwd.join(&url);
             if let Ok(abs_path) = abs_path.canonicalize() {
-                url = format!("file://{}", abs_path.display());
+                url = path_to_file_url(&abs_path);
             }
         }
     } else if url.starts_with("file://") {
@@ -65,7 +72,7 @@ fn normalize_url(url: &str) -> String {
             if let Ok(cwd) = std::env::current_dir() {
                 let abs_path = cwd.join(path_part);
                 if let Ok(abs_path) = abs_path.canonicalize() {
-                    url = format!("file://{}", abs_path.display());
+                    url = path_to_file_url(&abs_path);
                 }
             }
         }
