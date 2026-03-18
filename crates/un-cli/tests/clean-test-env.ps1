@@ -5,7 +5,8 @@ $ErrorActionPreference = "Stop"
 Write-Host "Cleaning up test environment..."
 
 # Remove test data and repos
-if (Test-Path "tests/test_data") { Remove-Item -Recurse -Force "tests/test_data" }
+if (Test-Path "crates/un-cli/tests/test_data") { Remove-Item -Recurse -Force "crates/un-cli/tests/test_data" }
+if (Test-Path "crates/un-cli/tests/repos") { Remove-Item -Recurse -Force "crates/un-cli/tests/repos" }
 if (Test-Path "tests/repos") { Remove-Item -Recurse -Force "tests/repos" }
 
 # Remove cache and lock files

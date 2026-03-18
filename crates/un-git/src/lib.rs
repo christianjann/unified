@@ -47,7 +47,15 @@ impl GitRemote {
 
 fn normalize_url(url: &str) -> String {
     let mut url = url.trim_end_matches('/').to_string();
-    if url.starts_with("file://") {
+    if url.starts_with("./") || url.starts_with("../") {
+        // Plain relative path — resolve to absolute file:// URL
+        if let Ok(cwd) = std::env::current_dir() {
+            let abs_path = cwd.join(&url);
+            if let Ok(abs_path) = abs_path.canonicalize() {
+                url = format!("file://{}", abs_path.display());
+            }
+        }
+    } else if url.starts_with("file://") {
         // Handle file:// URLs - resolve relative paths
         let path_part = &url[7..]; // Remove "file://"
         if path_part.starts_with("./")
@@ -78,6 +86,7 @@ pub struct GitDatabase {
 
 impl GitDatabase {
     pub fn new(cache: &Cache, name: &str, url: &str) -> Result<Self> {
+        let url = normalize_url(url);
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -96,7 +105,7 @@ impl GitDatabase {
                 anyhow::bail!("git init --bare failed in {}", path.display());
             }
             let status = std::process::Command::new("git")
-                .args(["remote", "add", "origin", url])
+                .args(["remote", "add", "origin", &url])
                 .current_dir(&path)
                 .status()
                 .context("failed to run `git remote add`")?;

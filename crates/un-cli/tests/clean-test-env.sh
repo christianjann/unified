@@ -6,7 +6,8 @@ set -e
 echo "Cleaning up test environment..."
 
 # Remove test data and repos
-rm -rf tests/test_data
+rm -rf crates/un-cli/tests/test_data
+rm -rf crates/un-cli/tests/repos
 rm -rf tests/repos
 
 # Remove cache and lock files
