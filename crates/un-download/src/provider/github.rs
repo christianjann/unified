@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use super::{read_response_with_progress, Release, ReleaseAsset};
+use super::{Release, ReleaseAsset, read_response_with_progress};
 
 /// Parses the GitHub `Link` header to extract the "next" page URL.
 fn parse_next_link(link_header: &str) -> Option<String> {

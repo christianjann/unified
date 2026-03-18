@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use super::{read_response_with_progress, Release, ReleaseAsset};
+use super::{Release, ReleaseAsset, read_response_with_progress};
 
 pub struct GiteaProvider;
 
@@ -27,9 +27,7 @@ impl GiteaProvider {
                 page,
             );
 
-            let mut builder = client
-                .get(&url)
-                .header("User-Agent", "unified/0.1");
+            let mut builder = client.get(&url).header("User-Agent", "unified/0.1");
 
             if let Some(t) = token {
                 builder = builder.header("Authorization", format!("token {}", t));
@@ -72,9 +70,7 @@ impl GiteaProvider {
         token: Option<&str>,
         pb: Option<&ProgressBar>,
     ) -> Result<Vec<u8>> {
-        let mut builder = client
-            .get(url)
-            .header("User-Agent", "unified/0.1");
+        let mut builder = client.get(url).header("User-Agent", "unified/0.1");
 
         if let Some(t) = token {
             builder = builder.header("Authorization", format!("token {}", t));

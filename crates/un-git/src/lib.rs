@@ -162,7 +162,8 @@ impl GitDatabase {
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
 
-            let mut child = cmd.spawn()
+            let mut child = cmd
+                .spawn()
                 .context("failed to run `git fetch` — is git installed?")?;
 
             let stderr = child.stderr.take().unwrap();
@@ -193,8 +194,7 @@ impl GitDatabase {
                 parse_git_progress(&line_buf, pb);
             }
 
-            let status = child.wait()
-                .context("failed to wait for `git fetch`")?;
+            let status = child.wait().context("failed to wait for `git fetch`")?;
             if !status.success() {
                 anyhow::bail!("git fetch failed for {}", remote.url());
             }
@@ -279,10 +279,7 @@ fn parse_git_progress(line: &str, pb: &ProgressBar) {
             }
 
             // Extract speed info if present (e.g. "| 640.00 KiB/s")
-            let speed_info = text
-                .find('|')
-                .map(|i| text[i + 1..].trim())
-                .unwrap_or("");
+            let speed_info = text.find('|').map(|i| text[i + 1..].trim()).unwrap_or("");
 
             if speed_info.is_empty() {
                 pb.set_message(format!("{} {}%", phase, pct));

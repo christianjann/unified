@@ -30,8 +30,7 @@ pub fn extract_archive(data: &[u8], filename: &str, dest: &Path) -> Result<usize
 
 fn extract_zip(data: &[u8], dest: &Path) -> Result<usize> {
     let cursor = Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).context("failed to open zip archive")?;
+    let mut archive = zip::ZipArchive::new(cursor).context("failed to open zip archive")?;
 
     let mut count = 0;
     for i in 0..archive.len() {
@@ -160,7 +159,9 @@ mod tests {
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        builder.append_data(&mut header, "test.txt", &content[..]).unwrap();
+        builder
+            .append_data(&mut header, "test.txt", &content[..])
+            .unwrap();
         let tar_data = builder.into_inner().unwrap();
 
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());

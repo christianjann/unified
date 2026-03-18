@@ -1,6 +1,7 @@
 default:
   just --list
 
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 set shell := ['bash', '-cu']
 
 fmt:

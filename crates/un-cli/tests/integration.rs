@@ -52,7 +52,13 @@ fn test_sync_file_repo() {
     let remote = un_git::GitRemote::new(&url);
     let database = un_git::GitDatabase::new(&cache, "test", &url).unwrap();
     let oid = database
-        .fetch(&remote, &un_core::GitReference::DefaultBranch, false, false, None)
+        .fetch(
+            &remote,
+            &un_core::GitReference::DefaultBranch,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Create workspace

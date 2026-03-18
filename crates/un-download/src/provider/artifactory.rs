@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use super::{read_response_with_progress, Release, ReleaseAsset};
+use super::{Release, ReleaseAsset, read_response_with_progress};
 
 pub struct ArtifactoryProvider;
 
@@ -70,13 +70,10 @@ impl ArtifactoryProvider {
                 asset_name
             );
 
-            version_map
-                .entry(version)
-                .or_default()
-                .push(ReleaseAsset {
-                    url: asset_url,
-                    name: asset_name,
-                });
+            version_map.entry(version).or_default().push(ReleaseAsset {
+                url: asset_url,
+                name: asset_name,
+            });
         }
 
         let releases = version_map
@@ -98,9 +95,7 @@ impl ArtifactoryProvider {
         token: Option<&str>,
         pb: Option<&ProgressBar>,
     ) -> Result<Vec<u8>> {
-        let mut builder = client
-            .get(url)
-            .header("User-Agent", "unified/0.1");
+        let mut builder = client.get(url).header("User-Agent", "unified/0.1");
 
         if let Some(t) = token {
             builder = builder.header("Authorization", format!("Bearer {}", t));

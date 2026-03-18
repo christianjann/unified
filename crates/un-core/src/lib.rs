@@ -249,17 +249,18 @@ impl Config {
     ) -> ResolvedProvider {
         // If an explicit provider name is given, look it up
         if let Some(name) = provider_name
-            && let Some(p) = self.providers.get(name) {
-                let token = p
-                    .token_env
-                    .as_deref()
-                    .and_then(|env| std::env::var(env).ok());
-                return ResolvedProvider {
-                    provider_type: p.provider_type.clone(),
-                    api_url: p.api_url.clone(),
-                    token,
-                };
-            }
+            && let Some(p) = self.providers.get(name)
+        {
+            let token = p
+                .token_env
+                .as_deref()
+                .and_then(|env| std::env::var(env).ok());
+            return ResolvedProvider {
+                provider_type: p.provider_type.clone(),
+                api_url: p.api_url.clone(),
+                token,
+            };
+        }
 
         // Fall back to built-in defaults based on source type
         match source {
@@ -296,15 +297,23 @@ impl Config {
 impl Artifact {
     pub fn source(&self) -> Option<DownloadSource> {
         if let Some(ref gh) = self.github {
-            Some(DownloadSource::GitHub { owner_repo: gh.clone() })
+            Some(DownloadSource::GitHub {
+                owner_repo: gh.clone(),
+            })
         } else if let Some(ref gl) = self.gitlab {
-            Some(DownloadSource::GitLab { project: gl.clone() })
+            Some(DownloadSource::GitLab {
+                project: gl.clone(),
+            })
         } else if let Some(ref gt) = self.gitea {
-            Some(DownloadSource::Gitea { owner_repo: gt.clone() })
+            Some(DownloadSource::Gitea {
+                owner_repo: gt.clone(),
+            })
         } else if let Some(ref art) = self.artifactory {
             Some(DownloadSource::Artifactory { path: art.clone() })
         } else {
-            self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() })
+            self.url
+                .as_ref()
+                .map(|url| DownloadSource::Url { url: url.clone() })
         }
     }
 
@@ -316,15 +325,23 @@ impl Artifact {
 impl Tool {
     pub fn source(&self) -> Option<DownloadSource> {
         if let Some(ref gh) = self.github {
-            Some(DownloadSource::GitHub { owner_repo: gh.clone() })
+            Some(DownloadSource::GitHub {
+                owner_repo: gh.clone(),
+            })
         } else if let Some(ref gl) = self.gitlab {
-            Some(DownloadSource::GitLab { project: gl.clone() })
+            Some(DownloadSource::GitLab {
+                project: gl.clone(),
+            })
         } else if let Some(ref gt) = self.gitea {
-            Some(DownloadSource::Gitea { owner_repo: gt.clone() })
+            Some(DownloadSource::Gitea {
+                owner_repo: gt.clone(),
+            })
         } else if let Some(ref art) = self.artifactory {
             Some(DownloadSource::Artifactory { path: art.clone() })
         } else {
-            self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() })
+            self.url
+                .as_ref()
+                .map(|url| DownloadSource::Url { url: url.clone() })
         }
     }
 
@@ -336,15 +353,23 @@ impl Tool {
 impl App {
     pub fn source(&self) -> Option<DownloadSource> {
         if let Some(ref gh) = self.github {
-            Some(DownloadSource::GitHub { owner_repo: gh.clone() })
+            Some(DownloadSource::GitHub {
+                owner_repo: gh.clone(),
+            })
         } else if let Some(ref gl) = self.gitlab {
-            Some(DownloadSource::GitLab { project: gl.clone() })
+            Some(DownloadSource::GitLab {
+                project: gl.clone(),
+            })
         } else if let Some(ref gt) = self.gitea {
-            Some(DownloadSource::Gitea { owner_repo: gt.clone() })
+            Some(DownloadSource::Gitea {
+                owner_repo: gt.clone(),
+            })
         } else if let Some(ref art) = self.artifactory {
             Some(DownloadSource::Artifactory { path: art.clone() })
         } else {
-            self.url.as_ref().map(|url| DownloadSource::Url { url: url.clone() })
+            self.url
+                .as_ref()
+                .map(|url| DownloadSource::Url { url: url.clone() })
         }
     }
 

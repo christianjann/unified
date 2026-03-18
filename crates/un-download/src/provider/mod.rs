@@ -184,18 +184,20 @@ fn find_platform_asset(
 
     // Check user-provided platform mapping first
     if let Some(keyword) = platform_map.get(current)
-        && let Some(idx) = assets.iter().position(|a| {
-            a.name.to_lowercase().contains(&keyword.to_lowercase())
-        }) {
-            return Some(idx);
-        }
+        && let Some(idx) = assets
+            .iter()
+            .position(|a| a.name.to_lowercase().contains(&keyword.to_lowercase()))
+    {
+        return Some(idx);
+    }
 
     // Fall back to built-in platform keywords
     let keywords = platform::platform_keywords();
     for keyword in keywords {
-        if let Some(idx) = assets.iter().position(|a| {
-            a.name.to_lowercase().contains(&keyword.to_lowercase())
-        }) {
+        if let Some(idx) = assets
+            .iter()
+            .position(|a| a.name.to_lowercase().contains(&keyword.to_lowercase()))
+        {
             return Some(idx);
         }
     }

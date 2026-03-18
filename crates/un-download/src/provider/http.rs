@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use sha2::{Digest, Sha256};
 
-use super::{read_response_with_progress, DownloadEngine};
+use super::{DownloadEngine, read_response_with_progress};
 
 pub struct HttpProvider;
 
