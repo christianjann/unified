@@ -244,6 +244,12 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn test_platform_map() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert(crate::platform::current_platform().to_string(), "linux-x86_64".to_string());
+        m
+    }
+
     #[test]
     fn parse_version_with_v_prefix() {
         assert_eq!(parse_version("v1.2.3"), Some(Version::new(1, 2, 3)));
@@ -281,7 +287,7 @@ mod tests {
         ];
 
         let req = semver::VersionReq::parse(">=1.0").unwrap();
-        let result = DownloadEngine::choose_asset(&releases, &req, &HashMap::new());
+        let result = DownloadEngine::choose_asset(&releases, &req, &test_platform_map());
         assert!(result.is_some());
         assert_eq!(result.unwrap().version, "2.0.0");
     }
@@ -308,7 +314,7 @@ mod tests {
         ];
 
         let req = semver::VersionReq::parse("1.*").unwrap();
-        let result = DownloadEngine::choose_asset(&releases, &req, &HashMap::new());
+        let result = DownloadEngine::choose_asset(&releases, &req, &test_platform_map());
         assert!(result.is_some());
         assert_eq!(result.unwrap().version, "1.5.0");
     }
@@ -325,7 +331,7 @@ mod tests {
         }];
 
         let req = semver::VersionReq::parse(">=1.0").unwrap();
-        let result = DownloadEngine::choose_asset(&releases, &req, &HashMap::new());
+        let result = DownloadEngine::choose_asset(&releases, &req, &test_platform_map());
         assert!(result.is_none());
     }
 
