@@ -40,12 +40,24 @@ check: clippy fmt-check
 test: test-setup cargo-test sync test-clean 
 
 # Setup test environment (creates test git repo)
+[unix]
 test-setup:
     ./crates/un-cli/tests/setup-test-env.sh
 
+# Setup test environment (creates test git repo)
+[windows]
+test-setup:
+    ./crates/un-cli/tests/setup-test-env.ps1
+
 # Clean test environment (removes test data, cache, repos)
+[unix]
 test-clean:
     ./crates/un-cli/tests/clean-test-env.sh
+
+# Clean test environment (removes test data, cache, repos)
+[windows]
+test-clean:
+    ./crates/un-cli/tests/clean-test-env.ps1
 
 # Clean test environment and setup fresh one
 test-reset: test-clean test-setup
